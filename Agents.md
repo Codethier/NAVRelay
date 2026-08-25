@@ -1,182 +1,136 @@
-# AGENTS.md — NAVRelay
+# AGENTS.md: NAVRelay
 
-Last updated: 2026-08-24
+Last updated: 2026-08-25
 
 ## 1. Purpose
 
-NAVRelay is an open-source, API-first invoicing platform for Hungarian businesses.
-
-The product should feel like an API-first Billingo or Számlázz.hu alternative, while remaining auditable, self-hostable, and suitable for a hosted multi-tenant SaaS offering. It must issue or ingest invoices, store the canonical invoice document in S3-compatible object storage, submit the required invoice data directly to the Hungarian NAV Online Számla API, and expose invoices for authorized review through either authenticated user access or revocable audit links.
-
-The system must support both of these document paths:
-
-1. **Generated document:** NAVRelay allocates the invoice number and generates the final PDF.
-2. **Provided document:** an external system supplies an already-finalized PDF and its invoice data; NAVRelay stores the exact bytes, reports the invoice to NAV, and provides the same audit and export facilities.
-
-Stripe is an important integration, but NAVRelay must not be designed as a Stripe-only application. Stripe invoices are one possible external document source. Stripe receipts are not accepted as invoice documents.
+NAVRelay is an open-source, API-first invoicing platform for Hungarian businesses. It issues invoices through two managed workflows: `NAVRELAY_RENDERED`, where NAVRelay allocates the number and renders the PDF, and `TRUSTED_CLIENT_RENDERED`, where NAVRelay allocates the number, locks the snapshot, and a trusted client returns PDF bytes from a scoped render package. Every issued invoice has one canonical document in S3-compatible storage, is reported directly to NAV, and is available through authenticated review or revocable audit links. It supports self-hosted and hosted multi-tenant use. Stripe supplies payment and tax evidence only; its PDFs and receipts are never canonical documents.
 
 ### Product position and go/no-go rule
 
-NAVRelay is not justified merely as a way for one low-volume company to avoid a small Billingo or Számlázz.hu subscription. It is justified when one or more of these are product requirements:
+Avoid building NAVRelay only to save one low-volume company a small Billingo or Számlázz.hu fee. Build it when at least one of these is required:
 
 - open-source and self-hosted deployment;
-- a stable developer-first REST API rather than a proprietary invoicing UI;
+- a stable developer-first REST API instead of a proprietary invoice UI;
 - customer-owned S3 storage and reproducible audit exports;
-- direct NAV connectivity without a commercial invoicing intermediary;
-- multi-organization SaaS operation with human and machine access;
+- direct NAV access without a commercial invoice intermediary;
+- multi-organization SaaS with human and machine access;
 - reusable Stripe and other payment-provider adapters;
-- transparent, versioned tax/NAV mappings and an auditable processing trail.
+- transparent, versioned tax and NAV mappings with an auditable process.
 
-Do not attempt to reproduce every Billingo feature. The initial product is a focused invoicing, archival, NAV-reporting, and audit platform. General accounting, banking, inventory, and broad ERP features remain outside the core thesis.
+The initial product covers invoicing, archival, NAV reporting, and audits. It does not try to copy every Billingo feature or become a general accounting, banking, inventory, or ERP system.
 
 ## 2. Product principles
 
-The following principles are mandatory:
+These rules are mandatory:
 
-- **API first:** every important business operation is available through a documented public API before it is exposed in the web UI.
-- **Direct NAV integration:** do not depend on Billingo, Számlázz.hu, or another invoicing SaaS for NAV reporting.
-- **Canonical immutable document:** every issued invoice has exactly one canonical document whose exact bytes are preserved.
-- **S3 is the primary document store:** the database stores metadata and object references; durable invoice documents do not live on an application filesystem or Railway volume.
-- **Multi-tenant and multi-user:** one user may belong to multiple organizations, and one organization may contain multiple users and machine clients.
-- **Auditable by design:** issued data is append-only, every privileged action is logged, exports are reproducible, and access can be granted through a login or scoped share link.
-- **No silent legal assumptions:** tax treatment, mandatory invoice content, NAV mappings, archival mode, correction rules, and statutory exports are compliance-critical. Implement them from current official specifications and approved product policy, not from guesswork.
-- **No destructive correction:** an issued invoice is never edited in place. Corrections, cancellations, and reversals create new linked documents.
-- **Reliable asynchronous reporting:** an invoice is not considered successfully reported merely because NAV returned a transaction ID. Processing must continue until the final NAV result is known.
-- **Idempotency everywhere:** duplicate API calls, duplicate Stripe webhooks, worker retries, and process restarts must not create duplicate invoices or duplicate NAV submissions.
+- **API first.** Add each major business operation to the documented public API before the UI.
+- **Direct NAV.** Do not depend on Billingo, Számlázz.hu, or another invoice SaaS for NAV reporting.
+- **One immutable document.** Every issued invoice has one canonical document whose exact bytes remain unchanged.
+- **Managed numbering.** NAVRelay allocates every final invoice number from a NAVRelay-managed series. Clients and providers never supply one.
+- **S3 storage.** PostgreSQL keeps metadata and object references. Never keep durable production documents on an app filesystem or Railway volume.
+- **Multi-tenant and multi-user.** Users may join several organizations. Organizations may have several users and machine clients.
+- **Auditable.** Issued data is append-only. Log privileged actions, make exports reproducible, and allow scoped access by login or share link.
+- **No guessed compliance.** Use current official specifications and approved policy for tax, required content, NAV mappings, archival, corrections, and statutory exports.
+- **No destructive corrections.** Correct, cancel, or reverse an invoice with a new linked document, never an in-place edit.
+- **Final NAV result.** A transaction ID is not success. Continue processing until NAV returns a final result.
+- **Idempotency.** Duplicate API calls or Stripe webhooks, worker retries, and process restarts must not duplicate invoices or NAV submissions.
 
 ## 3. Instruction priority
 
-When instructions conflict, apply them in this order:
+Resolve conflicts in this order:
 
-1. Current Hungarian law and current official NAV specifications.
-2. Explicit project decisions in this file.
-3. The repository's current implementation and migrations.
+1. Current Hungarian law and official NAV specifications.
+2. Decisions in this file.
+3. Current repository code and migrations.
 4. `defaultstack.md` and the user's default-stack conventions.
 5. Framework defaults and third-party examples.
 
-Never weaken an invoice immutability, authorization, tenancy, idempotency, or audit requirement merely to simplify an implementation.
+Never weaken immutability, authorization, tenancy, idempotency, or audit rules to simplify code.
 
 ## 4. Legal and compliance boundary
 
-This file is an engineering specification, not a legal opinion.
+This is an engineering specification, not legal advice. Before production, obtain written approval from a Hungarian accountant, tax adviser, or tax lawyer for:
 
-Before a production launch, the owner must obtain written validation from a Hungarian accountant, tax adviser, or tax lawyer for at least:
+- invoice and tax scenarios, required fields and wording, VAT and exemption, EU B2B reverse charge, and EU B2C or OSS;
+- foreign currency and HUF VAT, plus advance, final, corrective, and cancellation invoices;
+- electronic-invoice authenticity and integrity, including exact NAV `electronicInvoiceHash` behavior;
+- retention, deletion, and the required "adóhatósági ellenőrzési adatszolgáltatás" export;
+- trusted-renderer identities and profiles, upload controls, handback deadline, issue-state semantics, and PDF/NAV hash timing;
+- Stripe payment and tax profiles and mappings.
 
-- supported invoice types and tax scenarios;
-- mandatory invoice fields and wording;
-- VAT and exemption mappings;
-- EU B2B reverse-charge behavior;
-- EU B2C and OSS handling;
-- foreign-currency invoices and HUF VAT presentation;
-- advance, final, corrective, and cancellation invoices;
-- the selected electronic-invoice authenticity and integrity method;
-- the exact NAV `electronicInvoiceHash` behavior used by the implementation;
-- statutory retention duration and deletion policy;
-- the required “adóhatósági ellenőrzési adatszolgáltatás” export format;
-- whether a configured Stripe-generated PDF satisfies every mandatory requirement for each enabled scenario.
-
-Coding agents must not claim that any arbitrary Stripe PDF is automatically a valid Hungarian invoice. The system may accept it only through an explicitly supported and tested external-document profile.
+Never use a Stripe invoice PDF or receipt as a NAVRelay invoice document. A trusted client may return PDF bytes only for an active, scoped render request created after NAVRelay allocates the number and locks the invoice snapshot.
 
 ## 5. Default technology stack
 
-Follow the repository-pinned versions, but use the user's default stack unless this file overrides it.
+Use repository-pinned versions. Otherwise follow the user's default stack unless this file overrides it.
 
 ### Core stack
 
-- TypeScript across frontend, backend, worker, and shared packages.
+- TypeScript for frontend, backend, worker, and shared packages.
 - Modern Node.js with native ESM.
-- pnpm, pinned through `packageManager`.
-- Nuxt with Vue Composition API and SSR.
-- Nuxt UI and Tailwind CSS.
-- NestJS backend organized by business domain.
+- pnpm pinned through `packageManager`.
+- Nuxt, Vue Composition API, SSR, Nuxt UI, Tailwind CSS, and Nuxt i18n.
+- NestJS organized by business domain.
 - Swagger/OpenAPI generated from NestJS controllers and DTOs.
-- `nuxt-open-fetch` generated client for frontend business APIs.
+- `nuxt-open-fetch` for the generated frontend business API client.
 - `class-validator` DTO validation on every write boundary.
 - Railway PostgreSQL.
 - MikroORM with generated migrations.
-- Better Auth with cookie-based human sessions and the official Organization plugin for organizations, memberships, invitations, active-organization state, and organization-scoped access control.
-- Nuxt i18n and request-aware backend localization.
+- Better Auth cookie sessions plus the official Organization plugin.
+- Request-aware backend localization.
 - Vitest, Supertest, Testcontainers, and Playwright.
-- ZeptoMail through a backend email abstraction.
-- S3-compatible object storage as the mandatory primary document store.
+- ZeptoMail behind a backend email abstraction.
+- S3-compatible storage as the required primary document store.
 
 ### Deployment defaults
 
-Use separate Railway services for:
+Use separate Railway services for the Nuxt app, NestJS API, PostgreSQL, and durable worker. NAV submission and status checks, document processing, exports, and email belong in the worker, never as untracked web-process work.
 
-1. Nuxt web application.
-2. NestJS API.
-3. PostgreSQL.
-4. Durable background worker.
-
-The worker is separate because NAV submission, status checks, document processing, exports, and email delivery must not run as untracked background work inside the web process.
-
-GitHub Actions CI is mandatory for this project. Every pull request and every push to the protected default branch must run the repository root `pnpm run verify` unchanged. The stable `verify` check is a required merge check. Production deployment should be gated on that same commit SHA when Railway automatic deployment is enabled.
+GitHub Actions is required. Every pull request and protected-default-branch push must run the root `pnpm run verify` unchanged. The stable `verify` check must block merges. If Railway deploys automatically, release the same verified commit SHA.
 
 ## 6. Repository layout
 
-Prefer a pnpm workspace with the following conceptual layout:
+Prefer this pnpm workspace:
 
 ```text
 NAVRelay/
 ├─ apps/
 │  ├─ web/                 # Nuxt user, admin, and audit UI
 │  ├─ api/                 # NestJS public and internal API
-│  └─ worker/              # Durable jobs: NAV, PDF, exports, email
+│  └─ worker/              # NAV, PDF, export, and email jobs
 ├─ packages/
 │  ├─ nav-online-invoice/  # NAV v3 transport, XML, signing, parsing
-│  ├─ invoice-domain/      # Shared domain values and pure calculations
+│  ├─ invoice-domain/      # Shared values and pure calculations
 │  ├─ pdf-renderer/        # Deterministic invoice rendering
 │  ├─ storage/             # S3 abstraction and integrity helpers
-│  ├─ api-client/          # Generated output only, if kept as a package
+│  ├─ api-client/          # Generated output only, if retained
 │  └─ test-fixtures/       # Official-schema and project fixtures
-├─ docs/
-│  ├─ compliance/
-│  ├─ architecture/
-│  └─ operations/
-├─ .github/
-│  └─ workflows/
-│     ├─ verify.yml         # required PR and default-branch gate
-│     └─ nav-contract.yml   # trusted/manual or scheduled NAV test contract run
+├─ docs/{compliance,architecture,operations}/
+├─ .github/workflows/
+│  ├─ verify.yml           # required PR and default-branch gate
+│  └─ nav-contract.yml     # trusted manual or scheduled NAV contract run
 ├─ defaultstack.md
 ├─ AGENTS.md
 ├─ pnpm-workspace.yaml
 └─ package.json
 ```
 
-Do not duplicate business rules between `apps/api` and `apps/worker`. Domain services may be shared, but HTTP controllers, worker consumers, and provider adapters remain separate entry points.
+Do not duplicate business rules in `apps/api` and `apps/worker`. Share domain services, but keep controllers, worker consumers, and provider adapters as separate entry points.
 
 ## 7. High-level architecture
 
 ```text
-Public browser                    Machine/API client                    Stripe
-     |                                  | API key + scopes                 | signed webhook
-     v                                  v                                  v
-Nuxt web application          api.example.com/v1/*           api.example.com/webhooks/stripe
-     |                                  |                                  |
-     | Railway private network          +---------------+------------------+
-     v                                                  v
-NestJS control routes                            NestJS API
-                                                       |
-                         api.example.com/docs ----------+  Swagger UI
-                    api.example.com/openapi.json -------+  OpenAPI contract
-                                                       |
-                                                       +---- PostgreSQL: domain state, jobs, audit metadata
-                                                       |
-                                                       +---- S3: canonical PDFs, XML, receipts, manifests, exports
-                                                       |
-                                                       v
-                                                Durable job queue
-                                                       |
-                                                       v
-                                                  Worker service
-                                                  |     |      |
-                                                  |     |      +---- ZeptoMail
-                                                  |     +----------- S3
-                                                  +----------------- NAV Online Számla v3
+Browser -> Nuxt -> Railway private network -> NestJS
+Machine client -> public /v1/* with API key -> NestJS
+Stripe -> signed public webhook -> NestJS
+NestJS -> PostgreSQL for domain state, jobs, and audit metadata
+NestJS -> S3 for canonical PDFs, NAV response artifacts, manifests, and exports
+NestJS -> durable queue -> worker -> NAV, S3, ZeptoMail
+Public API -> /docs and /openapi.json
 ```
 
-The NestJS API is the authority for business rules, authorization, invoice issuance, tenancy, and API idempotency. The worker performs retriable external work. S3 is the authority for canonical document bytes, while PostgreSQL is the authority for document metadata, state, relationships, and audit history.
+NestJS owns business rules, authorization, issuance, tenancy, and idempotency; the worker handles retriable external work; PostgreSQL owns state and metadata; S3 owns canonical bytes.
 
 ## 8. Tenant and user model
 
@@ -184,395 +138,262 @@ NAVRelay is multi-tenant from the first migration.
 
 ### Required entities
 
-Authentication and human organization management use Better Auth's runtime model, mirrored exactly in MikroORM migrations:
+Mirror Better Auth's runtime model exactly in MikroORM migrations:
 
-- `User`
-- `Session`
-- `Account`
-- `Verification`
-- `Organization`
-- `OrganizationMembership` / Better Auth `Member`
-- `OrganizationInvitation`
+- `User`, `Session`, `Account`, `Verification`;
+- `Organization`;
+- `OrganizationMembership`, matching Better Auth `Member`;
+- `OrganizationInvitation`.
 
-NAVRelay-owned domain entities include at least:
+NAVRelay owns at least:
 
-- `ApiClient`
-- `ApiKey`
-- `NavConnection`
-- `InvoiceSeries`
-- `TaxProfile`
-- `Invoice`
-- `InvoiceLine`
-- `InvoiceDocument`
-- `InvoiceRelation`
-- `PaymentReference`
-- `NavSubmission`
-- `NavSubmissionMessage`
-- `StripeIntegration`
-- `StripeEvent`
-- `AuditEvent`
-- `AuditShare`
-- `ExportJob`
-- `StoredObject`
-- `BackgroundJob`, or an equivalent durable queue model
+- `ApiClient`, `ApiKey`, `NavConnection`, `InvoiceSeries`, `TaxProfile`;
+- `Invoice`, `InvoiceLine`, `InvoiceDocument`, `InvoiceRenderRequest`, `RendererProfile`, `InvoiceRelation`, `PaymentReference`;
+- `NavSubmission`, `NavSubmissionMessage`;
+- `StripeIntegration`, `StripeEvent`;
+- `AuditEvent`, `AuditShare`, `ExportJob`, `StoredObject`;
+- `BackgroundJob` or an equivalent durable queue model.
 
-A user may belong to more than one organization. Every tenant-owned row must contain an explicit `organizationId`, either directly or through an unavoidable parent relation.
+Users may join several organizations. Every tenant-owned row needs an explicit `organizationId`, directly or through an unavoidable parent.
 
 ### Better Auth organization ownership
 
-- Enable Better Auth's `organization()` server plugin and `organizationClient()` frontend plugin.
-- Better Auth owns runtime writes for users, sessions, organizations, members, invitations, active-organization state, and member-role assignment.
-- MikroORM owns all DDL and migration history. Mirror every enabled Better Auth and Organization-plugin table, column, index, unique constraint, and plugin field exactly; Better Auth must not auto-migrate production.
-- Define the initial NAVRelay organization roles and permissions statically in typed code through Better Auth's access-control API. Do not create parallel `Role` and `Permission` tables for the initial release.
-- Dynamic per-organization roles are disabled initially. If enabled later, adopt Better Auth's dynamic access-control model and mirror its organization-role table instead of inventing a competing authorization store.
-- Machine clients and API keys remain NAVRelay domain entities and never masquerade as Better Auth users or organization members.
-- Organization deletion through a generic Better Auth endpoint must be intercepted or disabled. An organization with retained invoices must enter an archival/closed state rather than cascading deletion of legally retained domain records.
+- Enable `organization()` on the server and `organizationClient()` on the frontend.
+- Better Auth writes users, sessions, organizations, members, invitations, active-organization state, and member roles at runtime.
+- MikroORM owns all DDL and migration history. Mirror every enabled Better Auth and Organization-plugin table, field, index, and unique constraint. Disable Better Auth production auto-migration.
+- Define initial roles and permissions as typed static code through Better Auth access control. Do not add parallel `Role` or `Permission` tables.
+- Disable dynamic organization roles initially. If added later, use Better Auth's dynamic model and mirror its organization-role table.
+- API clients and keys remain NAVRelay entities. They never act as Better Auth users or members.
+- Disable or intercept generic Better Auth organization deletion. Organizations with retained invoices enter a closed archival state; never cascade-delete retained records.
 
 ### Human roles
 
-Start with these roles:
-
-- `owner`: organization ownership, billing, credentials, members, all data.
-- `admin`: organization settings, users, integrations, invoice operations.
-- `accountant`: invoices, NAV results, exports, corrections, customer data.
+- `owner`: ownership, billing, credentials, members, and all data.
+- `admin`: settings, users, integrations, and invoice operations.
+- `accountant`: invoices, NAV results, exports, corrections, and customer data.
 - `operator`: create drafts and issue supported invoices, without credential administration.
-- `auditor`: read-only access to invoices, documents, NAV results, and exports.
-- `viewer`: limited read-only operational access.
+- `auditor`: read-only invoices, documents, NAV results, and exports.
+- `viewer`: limited read-only operations.
 
-Roles are organization-scoped. Do not store a universal role directly on the user as the authorization source.
+Roles are organization-scoped. A user-level universal role is never the authorization source.
 
 ### Machine access
 
-Machine clients are not fake users. Use separate API clients and API keys with:
+Machine clients are not fake users. API clients and keys need:
 
-- organization scope;
-- explicit permission scopes;
-- hashed tokens at rest;
-- identifiable token prefix;
-- creation, rotation, last-used, expiry, and revocation timestamps;
+- organization and explicit permission scopes;
+- hashed secrets at rest and an identifiable prefix;
+- creation, rotation, last-used, expiry, and revocation times;
 - configurable rate limits and usage accounting;
-- complete audit logging;
-- no ability to retrieve the original secret after creation.
+- full audit logging;
+- one-time secret display with no later retrieval.
 
-API keys are the primary machine-authentication mechanism. Do not rely on network location or obscurity for access control.
+API keys are the main machine authentication method. Network location and obscurity are not access controls.
 
 ## 9. Authorization and tenant isolation
 
-Every query and mutation must enforce organization ownership on the backend.
+The backend must enforce organization ownership on every query and mutation:
 
-Mandatory rules:
+- never trust a caller-supplied `organizationId`;
+- derive allowed organizations from human membership or the API-key principal;
+- scope every lookup for invoices, series, render requests, documents, customers, exports, and shares by organization;
+- prefer repository and service methods that require organization context;
+- prevent cross-tenant S3 key access;
+- authorize before creating a presigned URL;
+- limit each audit share to its immutable scope.
 
-- Never trust `organizationId` merely because the caller supplied it.
-- Resolve allowed organizations from the authenticated human membership or API-key principal.
-- Never query an invoice, series, document, customer, export, or audit share by global identifier without also enforcing organization scope.
-- Prefer repository/service methods that require an organization context.
-- Prevent cross-tenant object-key access in S3.
-- Presigned URLs must be generated only after backend authorization.
-- An auditor share may expose only the resources captured by its immutable scope.
-- Include explicit cross-tenant negative tests for every important resource.
+## 9A. API exposure and product endpoints
 
-## 9A. API exposure and product surfaces
+The API and its documentation are public. Authentication and authorization protect operations.
 
-NAVRelay is public and API-first. Authentication and authorization protect operations; the public existence of the API and its documentation is not considered a security weakness.
+### Public endpoints
 
-### Public surfaces
+- Serve the versioned machine API at public HTTPS `/v1/*`.
+- Serve supported Billingo v3 compatibility on a dedicated public host such as `billingo-api.example.com/v3/*`.
+- Publish `/openapi.json` and Swagger UI at `/docs`.
+- Require API keys, organization and permission scopes, rate limits, and idempotency for machine writes.
+- Treat Nuxt as a first-party client of the same business API for invoice editing, administration, review, audits, and exports.
+- Nuxt may use same-origin BFF routes and Railway private networking, but it must still pass through NestJS business rules and authorization.
+- Give each provider a narrow public webhook route with provider-specific signature verification and durable event deduplication.
+- Never expose worker, queue-admin, migration, or maintenance endpoints publicly.
 
-- Expose the versioned machine API under `/v1/*` on a public HTTPS endpoint.
-- Publish the generated OpenAPI document at `/openapi.json` and an interactive Swagger UI at `/docs`.
-- Require API-key authentication, organization scope, permission scopes, rate limiting, and idempotency for machine writes.
-- The Nuxt application is a first-party client of the same business API. It provides human workflows, including an invoice editor, organization administration, invoice review, audit access, and exports.
-- Browser calls for the owned UI may use same-origin Nuxt server routes/BFF endpoints and Railway private networking, but they must not bypass NestJS business rules or authorization.
-- Stripe and other provider webhooks use narrowly scoped public webhook routes with provider-specific signature verification and durable event deduplication.
-- Internal worker, queue-administration, migration, and maintenance endpoints must not be publicly exposed.
+One NestJS codebase may serve session routes, the machine API, and webhooks. Keep their guards, DTOs, and namespaces separate while sharing domain services and persistence.
 
-One NestJS codebase may serve the session-based control plane, documented machine API, and webhook routes. Keep their guards, DTOs, and route namespaces explicit, while sharing the same domain services and persistence model.
+### Billingo API v3 compatibility
+
+Enable compatibility by default for each organization, gated by API-key scopes. Native `/v1` remains canonical and preferred. For explicitly supported operations, a Billingo client may need only a base URL, credential, and idempotency-input change. Publish every known difference.
+
+- Pin each release to a Billingo OpenAPI version. Start with `3.0.15`.
+- Keep a versioned matrix of supported operations, fields, document types, and known differences.
+- Keep Billingo controllers, DTOs, serializers, and error mapping at the HTTP boundary. Translate to the same application services as `/v1`; never persist Billingo DTOs as the invoice aggregate.
+- Publish separate native and compatibility OpenAPI documents. Never claim unsupported operations.
+- For supported operations, preserve `/v3`, `X-API-KEY`, `snake_case`, integer compatibility IDs, pagination, status codes, error envelopes, content types, and rate-limit headers.
+- Use stable organization-scoped mappings between compatibility IDs and internal IDs. Never expose internal UUIDs or resolve compatibility IDs globally.
+- Map Billingo document blocks only to configured NAVRelay-managed series and approved renderer modes. Never accept external numbering or arbitrary PDFs through the adapter.
+- Support only implemented and approved operations and tax or document cases. Return a documented compatibility error: `501` for an unimplemented operation and `422` for unsupported input or scenarios. Never reinterpret receipts, spending records, waybills, document types, VAT codes, or corrections.
+- Preserve all NAVRelay authorization, tenancy, exact arithmetic, immutability, S3, jobs, audit, retention, and final-NAV-result rules.
+- Use a unique Billingo `vendor_id` as the document-creation idempotency key when the contract permits it. Otherwise require `Idempotency-Key` for legal or externally visible writes. Reject missing keys; do not deduplicate by body hash alone.
+- Keep NAVRelay-only features and richer lifecycle data under `/v1`. Do not add undocumented fields to Billingo responses.
+- Test against the pinned contract, generated Billingo clients, project golden fixtures, tenant-isolation cases, and retries. Live comparisons require an official Billingo test account, explicit opt-in, and no production target.
+- Write independent, unaffiliated documentation. Do not copy Billingo docs, examples, UI, code, or branding, or imply endorsement or full parity.
 
 ### Core input workflows
 
-The product exposes three entry workflows over one invoicing engine:
+All inputs use one managed invoice engine:
 
-1. **Managed issuance through API or invoice editor**
-   - The caller or Nuxt editor supplies structured invoice data.
-   - NAVRelay validates the selected tax profile, allocates a number from a managed series, renders the canonical PDF, stores it in S3, and submits the normalized data to NAV.
+1. **NAVRelay-rendered issuance.** Accept structured data, validate the tax profile, allocate from a NAVRelay-managed series, lock the snapshot, render and store the PDF, then report to NAV.
+2. **Trusted-client-rendered issuance.** Validate and allocate exactly as above, then return the server-assigned number, immutable snapshot, renderer metadata, and a scoped render-attempt token. The trusted client returns PDF bytes for validation, hashing, canonical storage, and NAV reporting.
+3. **Provider-triggered issuance.** Translate authoritative provider state into one of the two managed renderer modes. Providers never supply the invoice number or canonical PDF and must not implement another invoice engine.
 
-2. **Finalized document import through API**
-   - The caller supplies structured invoice data plus an already-final PDF and an externally allocated invoice number.
-   - NAVRelay validates the enabled external-document profile, stores the exact PDF bytes in S3 without re-rendering, and submits the same normalized invoice data to NAV.
+No API accepts an already issued invoice, externally assigned number, standalone final PDF, or unrestricted S3 key.
 
-3. **Provider-driven workflow through signed webhooks**
-   - A payment or billing provider event invokes either managed issuance or finalized-document import.
-   - Provider adapters must never implement a second invoicing engine; they translate authoritative provider state into one of the two core workflows.
+The editor is optional UI, not another issuance mode. Headless deployments may use only the documented API and webhooks.
 
-The invoice editor is optional product UI, not a separate issuance mode. Headless deployments may use only the Swagger-documented API and webhooks.
+## 10. Invoice series and blocks
 
-## 10. Invoice-series and invoice-block model
-
-“Invoice block” and “invoice series” refer to the numbering authority and sequence from which invoice numbers are allocated.
-
-### Series modes
-
-Support two explicit modes:
-
-1. `MANAGED`
-   - NAVRelay owns number allocation.
-   - Used primarily with NAVRelay-generated PDFs.
-   - The next number is allocated atomically in PostgreSQL.
-
-2. `EXTERNAL`
-   - Another system already assigned the final invoice number.
-   - Used for supplied PDFs, including supported Stripe Invoice profiles.
-   - NAVRelay must not allocate a second number.
-   - NAVRelay enforces uniqueness and records observed sequence information, but the external issuer remains responsible for its numbering behavior.
-
-Do not mix managed and external numbering in one series.
+Invoice series are the numbering authority. All are NAVRelay-managed; drafts have no number. Native issuance accepts only an enabled issuance profile; a compatibility adapter may pass a block identifier mapped to a preconfigured organization series. No caller submits a raw series identifier or configuration, numbering mode, sequence, or final number.
 
 ### Series fields
 
-At minimum, model:
+Store organization, internal name, public prefix or number format, current or next sequence, optional year reset, document-type policy, allowed renderer modes, optional currency limits, active state, first and last issue times, immutable configuration history or snapshots, and audit metadata.
 
-- organization;
-- internal name;
-- public prefix or number format;
-- numbering mode;
-- current or next sequence value for managed series;
-- optional year-reset policy;
-- document type policy;
-- currency restrictions, if configured;
-- active/inactive state;
-- first and last issue timestamps;
-- immutable configuration snapshot or version history;
-- audit metadata.
+### Allocation
 
-### Managed allocation
-
-Allocate a managed invoice number only inside the same database transaction that creates the issued invoice record.
-
-Use a database row lock, atomic update, or another PostgreSQL-safe serialization mechanism. Concurrency must never produce duplicate numbers. Do not preallocate a number in a long-lived draft.
-
-The conceptual transaction is:
+Allocate only in the transaction that creates the locked `ISSUING` record and immutable snapshot. Use a row lock, atomic update, or another PostgreSQL-safe serialization method. Concurrent requests must never get the same number.
 
 ```text
 begin
-  lock invoice series
-  validate that it is active and compatible
+  lock series and validate that it is active and compatible
   allocate next sequence
-  create issued invoice with unique final number
-  increment series counter
+  create ISSUING invoice with a unique final number
+  store immutable invoice and series snapshots
+  create durable render request or render job
+  increment counter
   append audit event
 commit
 ```
 
-External calls, PDF rendering, S3 upload, NAV requests, and email must not run while this database transaction is open.
+Do not make external calls, render PDFs, upload to S3, call NAV, or send email inside this transaction.
 
 ### Series immutability
 
-After the first invoice has been issued from a managed series:
-
-- do not change its numbering mode;
-- do not silently change its prefix or formatting rules;
-- do not decrement or reuse sequence values;
-- do not delete it;
-- deactivate it instead;
-- preserve all historical settings required to reconstruct issued numbers.
+After the first invoice, never change the prefix or formatting rules, reduce or reuse a sequence, or delete the series. Deactivate it and keep enough historical configuration to reconstruct every number.
 
 ## 11. Invoice aggregate
 
-An invoice is a domain aggregate, not merely a PDF or a NAV XML document.
+The immutable invoice snapshot is locked when the number is allocated and includes:
 
-At minimum, preserve an immutable issued snapshot of:
-
-- organization/supplier identity and tax details;
-- customer identity and tax details required for the scenario;
-- invoice number;
-- issue date and time;
-- performance date;
-- payment due date, where applicable;
-- currency;
-- exchange-rate information, where applicable;
-- line items;
-- quantities and units;
+- organization and supplier identity and tax details;
+- required customer identity and tax details;
+- number, issue date and time, performance date, and any due date;
+- currency and any exchange-rate data;
+- lines, quantities, units, discounts, and adjustments;
 - net, tax, and gross amounts;
-- discounts and adjustments;
-- tax category and legal reason codes;
-- payment method/reference;
-- language;
-- notes and mandatory wording;
-- original/correction/cancellation relationships;
-- source system and source identifiers;
-- canonical document metadata;
-- NAV reporting state.
+- tax categories and legal reason codes;
+- payment method and reference;
+- language, notes, and required wording;
+- original, correction, and cancellation relations;
+- source system and identifiers.
 
-Use exact decimal arithmetic or integer minor units as appropriate. Never use JavaScript floating-point arithmetic for monetary totals or tax calculations.
+Keep document metadata and mutable business, document, NAV, and delivery state outside the snapshot; append their history and lock document metadata at canonicalization. Version the snapshot schema and store a SHA-256 hash of its deterministic serialization; render requests bind to that version and hash.
 
-### Tax-determination boundary
+Use exact decimals or integer minor units. Never calculate money or tax with JavaScript floating point.
 
-The initial release is not a general-purpose autonomous tax adviser.
+### Tax boundary
 
-- Each issued invoice must use an explicit, versioned `TaxProfile` approved for the organization and transaction type.
-- Public callers select from enabled profile identifiers and provide the required facts; they do not submit arbitrary NAV XML codes or free-form tax conclusions.
-- A tax profile defines supported seller/customer VAT status, jurisdiction, VAT rate or exemption, required evidence, mandatory wording, rounding, currency/exchange-rate behavior, and NAV mapping policy.
-- Begin with a deliberately narrow capability matrix. Unsupported or ambiguous combinations fail closed or enter pre-issuance manual review.
-- Stripe Tax or another calculator may provide a calculation result and evidence, but NAVRelay validates that result against an enabled profile and remains responsible for the invoice snapshot and NAV mapping. Do not treat a provider's result as automatic Hungarian legal approval.
-- Persist the tax-profile version, external calculation identifier, relevant input facts, result, and mapping-policy version for every issued invoice.
+NAVRelay is not an autonomous tax adviser.
+
+- Every invoice selects an explicit, versioned, organization-approved `TaxProfile`.
+- Callers provide the profile ID and facts only. Profiles define seller and customer VAT status, jurisdiction, rate or exemption, evidence, wording, rounding, currency and exchange rates, and NAV mapping.
+- Start narrow; fail closed or require review for unsupported or ambiguous cases.
+- Provider calculators may supply evidence. NAVRelay validates it and owns the snapshot and NAV mapping; provider output is not legal approval.
+- Store profile and mapping versions, external calculation ID, facts, and result.
 
 ## 12. Invoice lifecycle
 
-Use explicit states. Do not overload one status field for document, business, NAV, and delivery state.
+Keep separate state fields:
 
-### Business state
+- Business: `DRAFT`, `ISSUING`, `ISSUED`, `CORRECTED`, `CANCELLED`.
+- Document: `MISSING`, `GENERATING`, `AWAITING_CLIENT_PDF`, `STAGED`, `CANONICAL`, `FAILED`.
+- NAV: `NOT_REQUIRED`, `PENDING`, `SUBMITTING`, `PROCESSING`, `ACCEPTED`, `ACCEPTED_WITH_WARNINGS`, `REJECTED`, `RETRY_REQUIRED`, `MANUAL_REVIEW`.
+- Delivery: `NOT_REQUESTED`, `QUEUED`, `SENT`, `FAILED`.
 
-A useful baseline is:
-
-- `DRAFT`
-- `ISSUING`
-- `ISSUED`
-- `CORRECTED`
-- `CANCELLED`
-
-### Document state
-
-- `MISSING`
-- `STAGED`
-- `GENERATING`
-- `CANONICAL`
-- `FAILED`
-
-### NAV state
-
-- `NOT_REQUIRED`
-- `PENDING`
-- `SUBMITTING`
-- `PROCESSING`
-- `ACCEPTED`
-- `ACCEPTED_WITH_WARNINGS`
-- `REJECTED`
-- `RETRY_REQUIRED`
-- `MANUAL_REVIEW`
-
-### Delivery state
-
-- `NOT_REQUESTED`
-- `QUEUED`
-- `SENT`
-- `FAILED`
-
-Once `ISSUED`, business data and the canonical document are immutable. A failure to report to NAV does not make the invoice disappear; it creates an operational incident that must be retried or reviewed.
+Allocation sets `ISSUING` and locks invoice and series snapshots; it is neither editable nor reversible. Rendering failure cannot release or reuse the number, and retries use the same snapshot. Canonicalization sets `ISSUED`. NAV failure leaves the issued invoice for retry or review and never rewinds it. Issue timing follows approved policy.
 
 ## 13. Document modes
 
-Every issued invoice has exactly one canonical `InvoiceDocument`.
+Each allocated invoice may produce only one canonical `InvoiceDocument`, and every `ISSUED` invoice must have one. Rendering location never changes numbering authority: NAVRelay always owns the series, number, and immutable invoice snapshot.
 
-### 13.1 Generated PDF
+Both modes validate the draft, profiles, and server-resolved series; allocate and lock the invoice and series snapshots in one PostgreSQL transaction; render or receive the PDF; validate and hash the exact bytes; store them unchanged as the canonical S3 object; and set `CANONICAL` and `ISSUED`. NAV becomes runnable only after canonical PDF bytes and required hashes exist; enqueue delivery only after canonicalization.
 
-For `GENERATED` mode:
+### 13.1 NAVRelay-rendered PDF
 
-1. Validate the invoice draft and selected managed series.
-2. Allocate the final number and create the immutable issued snapshot.
-3. Render the PDF from that snapshot.
-4. Compute hashes from the exact rendered bytes.
-5. store the exact bytes in S3;
-6. mark the stored object canonical;
-7. enqueue NAV reporting;
-8. enqueue delivery only after the document is canonical.
+For `NAVRELAY_RENDERED`, the worker renders only from the snapshots. Record renderer identity and version, template version, locale, fonts, and assets. Rendering must be reproducible for investigation and never replace a canonical object.
 
-The renderer must be deterministic enough that the same immutable input and renderer version can be investigated later, but the system must never regenerate a canonical document and silently replace it.
+### 13.2 Trusted-client-rendered PDF
 
-Store the renderer name, renderer version, template version, locale, and any relevant font/template asset version as metadata.
+For `TRUSTED_CLIENT_RENDERED`, validate the renderer profile, identity, and client authorization, then create an `InvoiceRenderRequest` and durable outbox row during allocation. Return the invoice and attempt IDs, server number, immutable series snapshot/version, invoice snapshot/hash, approved renderer/template metadata, expiry, and a short-lived token or staging target. Show the token once, store only its hash, and never log it. Bind the request to organization, invoice, attempt, snapshot, renderer, content type, size, and any staging key.
 
-### 13.2 Provided PDF
+The client renders only from that package and returns PDF bytes. It cannot supply or change the series, number, dates, tax, totals, wording, or NAV codes. Validate its identity, request scope, PDF type, size, and content checks. Store returned bytes without rewriting, optimizing, linearizing, stamping, metadata changes, or re-rendering. This is renderer output for a NAVRelay-numbered, locked invoice, not an imported invoice.
 
-For `PROVIDED` mode:
-
-- the caller supplies a final PDF and all normalized invoice data;
-- the caller supplies the final external invoice number;
-- the invoice uses an `EXTERNAL` series;
-- NAVRelay calculates hashes from the exact received bytes;
-- NAVRelay stores those exact bytes without rewriting, optimizing, linearizing, stamping, or re-rendering them;
-- NAVRelay validates file type, size, upload ownership, and configured source profile;
-- NAVRelay never treats an S3 ETag as a cryptographic document hash;
-- the canonical object is immutable after issuance.
-
-For large or direct uploads, use a staged presigned-upload flow:
+The handback flow is:
 
 ```text
-POST /v1/document-uploads
-  -> returns scoped upload URL and upload token
-
-client uploads PDF to staging key
-
 POST /v1/invoices
-  -> references upload token and external invoice number
-  -> worker/API verifies bytes, hashes, and promotes to canonical storage
+  -> ISSUING invoice, final number, immutable render package, attempt token
+
+PUT /v1/invoice-render-requests/{renderRequestId}/document
+  -> validate exact PDF bytes
+  -> finalize directly, or stage for explicit finalization
+
+POST /v1/invoice-render-requests/{renderRequestId}/finalize
+  -> verify a presigned staging upload and promote unchanged bytes
+  -> canonical S3 object
+  -> ISSUED
+  -> NAV and delivery jobs
+
+POST /v1/invoices/{invoiceId}/render-requests
+  -> new attempt for the same locked number and snapshot
 ```
 
-A caller must never be allowed to supply an unrestricted S3 key.
+Each `InvoiceRenderRequest` is one attempt with state `ACTIVE`, `FINALIZING`, `SUPERSEDED`, `EXPIRED`, `FAILED`, or `CANONICAL`. An active attempt accepts repeated identical bytes with the same token until expiry. After canonicalization, an identical retry with a valid token returns the existing result and cannot write again; conflicting bytes fail. A new attempt locks the invoice, keeps the number, snapshot, and renderer-profile version, issues a new token, and atomically supersedes the old active attempt. Never supersede a finalizing attempt. A database guard lets only the current attempt finalize and canonicalize. Reject late callbacks from expired, failed, or superseded attempts.
 
-### 13.3 Stripe document profile
+An authorized status lookup and create-attempt operation recover a lost response or expired token without allocating another number. The renderer is NAVRelay's internal service or an approved, scoped `ApiClient` listed by the snapshotted `RendererProfile`. Store its identity and profile version on the attempt and document.
 
-Stripe support is an adapter over the provided-document flow.
+Every client-rendered attempt has a policy-set bounded expiry. Timeout, expiry, invalid PDF, or renderer failure leaves the invoice `ISSUING`, records an audit event, sets the document `FAILED`, and requires operator retry or review. It never becomes an editable draft. Keep its number, snapshot, attempts, incident, and audit history in invoice lists, sequence reports, operational exports, and retention controls. Legal resolution after the allowed window follows approved policy. Never roll back or reuse the number.
 
-- Accept a Stripe `invoice_pdf` only from an authenticated Stripe webhook/import flow or a server-side allowlisted fetch.
-- Verify the Stripe webhook signature.
-- Deduplicate by Stripe event ID and Stripe invoice ID.
-- Persist Stripe object IDs and the Stripe API version used.
-- Do not accept Stripe receipts as invoices.
-- Do not assume the Stripe document is compliant merely because Stripe calls it an invoice.
-- Require a configured Stripe invoice profile that maps and validates supplier details, customer details, invoice number, dates, lines, tax treatment, mandatory wording, currency behavior, and totals.
-- If a profile cannot guarantee all mandatory fields for a scenario, reject that scenario or use NAVRelay-generated PDFs instead.
-- Download the final PDF once, hash those exact bytes, and preserve them in S3. Do not depend on the long-term availability or byte stability of an external URL.
+Client-renderer trust is explicit. Its authenticated handback attests that the PDF represents the bound snapshot, but generic PDF parsing cannot prove full semantic equality. Each `RendererProfile` names approved identities, template versions, deadlines, disclosure scope, attestation rules, and validation. If policy requires stronger machine-verifiable matching, use `NAVRELAY_RENDERED` or reject issuance.
+
+If the approved electronic-invoice method requires the PDF hash in the NAV request, the renderer handback and NAV submission must satisfy the approved timing rule. Disable `TRUSTED_CLIENT_RENDERED` for any profile that cannot do so. Allocation may create a `NavSubmission` intent in `PENDING`, but not a runnable job. The canonicalization transaction inserts the NAV outbox row.
+
+Never accept a standalone final PDF, caller-supplied invoice number, remote PDF URL, or unrestricted S3 key.
 
 ## 14. PDF validation
 
-For a provided PDF:
+For trusted-client-rendered PDFs:
 
-- verify the PDF magic header and actual content type;
-- enforce a configurable size limit;
-- reject encrypted/password-protected files unless an approved use case explicitly supports them;
-- run malware scanning behind a storage/upload abstraction when operating as a public SaaS;
-- do not use OCR as a compliance authority;
-- optionally extract text to detect obvious invoice-number or supplier mismatches, but treat this only as a validation aid;
-- require structured invoice data separately from the PDF;
-- store validation results and the selected document profile version.
-
-Do not modify the canonical bytes to add watermarks, page numbers, stamps, or metadata. Any derived preview is a separate non-canonical object.
+- Check PDF magic, actual content type, and size; reject encryption or passwords unless approved.
+- Malware-scan public uploads behind the storage abstraction.
+- Require an active organization-, invoice-, snapshot-, renderer-, and token-scoped attempt.
+- Optional text extraction may reject obvious number, supplier, or total mismatches. The immutable snapshot remains authoritative; OCR never is.
+- Store validation results, renderer identity, and profile version. Never modify canonical bytes; keep previews separate.
 
 ## 15. Hashing and integrity
 
-Store at least:
+Store SHA-256, algorithm, byte length, MIME type, S3 key, S3 version ID when available, upload and finalization times, and any required NAV electronic-invoice hash and algorithm. Internal SHA-256 differs from `electronicInvoiceHash`; the versioned NAV adapter derives the latter from the current schema, `completenessIndicator`, archival method, official docs, and test vectors. Periodically verify object bytes and report integrity.
 
-- a general internal content hash, initially SHA-256;
-- byte length;
-- MIME type;
-- S3 object key;
-- S3 version ID when available;
-- upload/finalization timestamp;
-- hash algorithm identifier;
-- any NAV-specific electronic-invoice hash and its algorithm, when the selected NAV mode requires one.
-
-Do not conflate the internal SHA-256 checksum with NAV's `electronicInvoiceHash`. The NAV hash input and allowed algorithm depend on the current NAV schema, `completenessIndicator`, and selected electronic-invoice/archival method. Implement this inside the versioned NAV adapter from current official documentation and test vectors.
-
-The system must be capable of periodically verifying stored object bytes against the recorded internal hash and producing an integrity report.
-
-## 16. S3 object-storage requirements
-
-S3-compatible object storage is mandatory for production documents.
+## 16. S3 object storage
 
 ### Storage rules
 
-- Buckets are private.
-- Use separate buckets or strict prefixes and credentials per environment.
-- Do not store durable invoice documents on local disk or Railway volumes.
-- Enable versioning where the provider supports it.
-- Prefer a provider supporting Object Lock or equivalent retention controls.
-- If the selected S3-compatible provider lacks required immutability capabilities, do not pretend otherwise; use a suitable provider or document an approved compensating control.
-- Use server-side encryption.
-- Keep object names free of unnecessary personal data.
-- Store canonical object metadata in PostgreSQL; S3 metadata is not the business source of truth.
-- Never overwrite a canonical key. New legal documents use new keys and new database records.
-- Use lifecycle rules only for temporary uploads, previews, and expired exports, never for retained canonical invoices.
-- Back up or replicate documents according to the approved disaster-recovery policy.
+- Keep buckets private. Separate environments by bucket or strict prefix and credentials; use server-side encryption and avoid personal data in keys.
+- Never store durable invoices on local disk or Railway volumes.
+- Enable versioning where available and prefer Object Lock or equivalent retention. If a provider cannot meet immutability needs, change it or approve a compensating control.
+- Keep canonical metadata in PostgreSQL; S3 metadata is not the business record. Never overwrite a canonical key, and give each new legal document a new object and row.
+- Use lifecycle rules only for temporary uploads or staging, previews, and expired exports; never for retained canonical invoices.
+- Back up or replicate documents under the approved disaster-recovery policy.
 
-### Suggested object layout
+Suggested layout:
 
 ```text
 organizations/{organizationId}/
@@ -586,35 +407,25 @@ organizations/{organizationId}/
   audit-manifests/{manifestId}.json
 ```
 
-Use opaque internal identifiers in keys. Present human invoice numbers through metadata and the application, not as the sole object identifier.
+Use opaque internal IDs in keys. Show invoice numbers through metadata and the app, not as the only object identifier.
 
 ### Presigned URLs
 
-- Generate short-lived URLs only after authorization.
-- Bind upload URLs to one organization, expected content type, size range, and staging key.
-- Bind download URLs to one canonical object and a short expiry.
-- Do not expose permanent public URLs.
-- Do not store presigned URLs in the database as if they were durable references.
+- Authorize before issuing a short-lived URL. Bind uploads to one organization, invoice, snapshot version/hash, render request, renderer, content type, size, attempt token, and staging key; finalization must verify the staged object before unchanged promotion to a new canonical key.
+- Bind downloads to one canonical object. Never expose permanent public URLs or store presigned URLs.
 
 ## 17. Retention and deletion
 
-Model retention explicitly on stored objects and invoices.
+Store `retentionUntil` and policy version on invoices and objects. The initial Hungarian target is at least eight years; final duration requires legal approval and may be longer.
 
-- Store `retentionUntil` and the policy/version that produced it.
-- The initial Hungarian product policy should target at least eight years of retention, but the final production rule requires legal approval and must remain configurable for longer periods.
-- Never allow a user to shorten an already-applied retention period through an ordinary UI or API operation.
-- Organization deletion must not delete documents that remain under mandatory retention.
-- Account closure should transition retained data to a restricted archival state.
-- Temporary uploads, failed staged documents, previews, and expired exports may have short lifecycle policies.
-- Legal holds override normal deletion.
+- UI and API calls cannot shorten retention.
+- Organization deletion cannot remove retained documents; closure moves them to restricted archival state.
+- Short lifecycles apply only to staging, failed staging, previews, and expired exports.
+- Legal holds override deletion. Audit every deletion and fail closed when retention is uncertain.
 
-A deletion operation must produce an audit event and must fail closed when retention status is uncertain.
+## 18. NAV Online Számla
 
-## 18. NAV Online Számla integration
-
-Implement NAV Online Számla as a versioned provider adapter. Version 3 is the initial target.
-
-Official environments must remain configurable. The current official endpoints are conceptually:
+Implement NAV Online Számla as a versioned adapter, initially v3. Keep official environments configurable:
 
 ```text
 Test frontend: https://onlineszamla-test.nav.gov.hu/
@@ -622,148 +433,71 @@ Test API:      https://api-test.onlineszamla.nav.gov.hu/invoiceService/v3
 Production:    https://api.onlineszamla.nav.gov.hu/invoiceService/v3
 ```
 
-Never hard-code an environment selected from a user-controlled request. Each organization has an explicit NAV connection environment, and production credentials cannot be used against test or vice versa.
+Do not select the environment from a user-controlled request. Each organization has an explicit NAV environment. Never mix test and production credentials.
 
 ### Required operations
 
-The adapter must cover at least:
-
-- token exchange;
-- invoice submission through `manageInvoice`;
-- transaction-status lookup;
-- supported correction/cancellation or technical-annulment flows;
-- taxpayer lookup where the product enables it;
-- parsing technical and business validation messages;
-- schema/version capability reporting.
+Support token exchange, `manageInvoice`, transaction-status lookup, approved correction, cancellation, or technical-annulment flows, optional taxpayer lookup, technical and business message parsing, and schema or capability reporting.
 
 ### Credentials
 
-Each organization uses its own NAV technical-user credentials.
+Each organization has its own NAV technical user.
 
-- Encrypt credentials at rest with an application-level key-management abstraction.
-- Restrict decryption to the worker/integration service that needs it.
-- Never log passwords, signing keys, exchange keys, raw authorization material, or request signatures.
-- Support credential rotation without rewriting historical submissions.
-- Separate test and production credentials.
-- Provide an explicit connection test that does not issue an invoice.
+- Encrypt credentials at rest through an application key-management abstraction.
+- Allow decryption only in the worker or integration service that needs it.
+- Never log passwords, signing or exchange keys, authorization material, or signatures.
+- Rotate credentials without changing historical submissions.
+- Keep test and production credentials separate.
+- Offer a connection test that does not issue an invoice.
 
-### Submission process
+### Submission
 
 ```text
-invoice becomes ISSUED and canonical document exists
-  -> create durable NAV submission job
+ISSUED invoice plus canonical document
+  -> durable NAV job
   -> build and XSD-validate exact request
-  -> obtain exchange token
-  -> call manageInvoice with a stable operation identity
-  -> persist request, response, transaction ID, and timestamps
-  -> poll/query transaction status through durable jobs
+  -> get exchange token
+  -> manageInvoice with stable operation identity
+  -> store request, response, transaction ID, and times
+  -> durable status polling
   -> parse technical and business messages
-  -> mark ACCEPTED, ACCEPTED_WITH_WARNINGS, REJECTED, or MANUAL_REVIEW
+  -> ACCEPTED, ACCEPTED_WITH_WARNINGS, REJECTED, or MANUAL_REVIEW
 ```
 
-A transaction ID is not the final success state.
+A transaction ID is not final success.
 
-### Retry rules
+### Retries
 
-- Retry network timeouts, connection resets, temporary NAV failures, and safe status queries with bounded backoff.
+- Retry timeouts, resets, temporary NAV failures, and safe status queries with bounded backoff.
 - Do not blindly retry permanent validation errors.
-- Ensure a retry does not create a second logical submission.
-- Persist attempt count, next-attempt time, last error code, and normalized error category.
-- Escalate after a configurable deadline or attempt threshold.
-- Provide an operator action to retry after a corrected configuration, without mutating the issued invoice.
+- Preserve one logical submission across retries.
+- Store attempt count, next-attempt time, last error code, and normalized error category.
+- Escalate after configurable time or attempt limits.
+- Let operators retry after configuration fixes without changing the issued invoice.
 
 ### Stored NAV artifacts
 
-Retain, subject to approved privacy and retention policy:
+Subject to privacy and retention policy, keep schema and adapter versions, normalized snapshot, exact outbound and response XML, transaction ID, final result, technical and business messages, request and correlation IDs, times, and attempt records. Never expose secrets or credential-derived fields through shares.
 
-- schema version;
-- normalized invoice snapshot;
-- exact outbound XML;
-- exact inbound response XML;
-- transaction ID;
-- final processing result;
-- technical/business validation messages;
-- request IDs and correlation IDs;
-- timestamps and attempt records;
-- adapter version.
+## 19. NAV schema, mapping, and compliance scope
 
-Never expose credential-derived fields or secrets through audit shares.
+Treat official XSD and interface docs as executable contracts. Vendor or update schemas through a controlled process; pin the version or checksum; XSD-validate outbound XML; use official examples and project golden fixtures; keep typed, versioned tax mappings; record the mapping-policy version per submission; keep NAV XML names out of controllers and entities; and separate normalized invoice data from transport DTOs. Schema upgrades require migration analysis, compatibility tests, and release notes.
 
-## 19. NAV schema and mapping discipline
+`packages/nav-online-invoice` owns namespaces, schemas, XSD validation, fixtures, password hashing, request signatures and IDs, token exchange, `manageInvoice`, retry identity, status polling, response parsing, normalized messages, endpoints, and credential separation. Controllers, Stripe adapters, and domain services must not duplicate it.
 
-Treat the official XSD and interface documentation as executable contracts.
+Compliance covers VAT status and jurisdiction; taxable, exempt, out-of-scope, reverse-charge, and OSS cases; currency and exchange rates; advance and final invoices; correction, cancellation, replacement, and annulment chains; required wording and PDF content; rounding and summaries; electronic hashes; archival; statutory exports; and NAV or legal changes.
 
-- Vendor the exact supported schema version or fetch it through a controlled update process.
-- Pin a schema checksum/version in the repository.
-- Validate outbound XML before submission.
-- Use official examples and project-owned golden fixtures.
-- Keep tax mappings in typed, versioned policy modules.
-- Do not scatter NAV XML field names throughout controllers and entities.
-- Separate normalized invoice data from NAV-specific transport DTOs.
-- Record which mapping-policy version produced each submission.
-- A schema upgrade requires migration analysis, compatibility tests, and release notes.
+Maintain an explicit supported-scenario matrix. Add one case at a time, only with official fixtures, domain tests, NAV test-environment checks, and compliance approval.
 
-## 19A. NAV implementation complexity and scope control
+## 20. Corrections, cancellations, and relations
 
-Treat NAV integration as two different complexity layers.
-
-### Transport layer: moderate and containable
-
-Keep these concerns inside `packages/nav-online-invoice`:
-
-- XML namespaces and schema-version handling;
-- XSD validation and golden fixtures;
-- password hashing, request signatures, token exchange, and request IDs;
-- `manageInvoice` submission and safe retry identity;
-- asynchronous transaction-status polling;
-- response parsing and normalized technical/business messages;
-- test-versus-production endpoint and credential separation.
-
-No controller, Stripe adapter, or invoice-domain service should reproduce this protocol logic.
-
-### Invoicing/compliance layer: high complexity
-
-The larger risk is not making an HTTP request to NAV. It is correctly modeling and maintaining:
-
-- seller/customer VAT statuses and jurisdiction;
-- taxable, exempt, out-of-scope, reverse-charge, and OSS scenarios;
-- foreign currency and exchange-rate rules;
-- advance/final invoices;
-- modifying, cancellation, replacement, and technical-annulment chains;
-- mandatory invoice wording and PDF content;
-- rounding and summary consistency;
-- electronic-invoice hashes, archival policy, and statutory exports;
-- behavior changes when NAV schemas or Hungarian rules change.
-
-Therefore, every release has an explicit supported-scenario matrix. A narrow, fully tested matrix is acceptable; an undocumented claim to support arbitrary invoices is not. Expand one scenario at a time with official fixtures, domain tests, NAV test-environment verification, and compliance sign-off.
-
-## 20. Corrections, cancellations, and relationships
-
-Issued invoices are immutable.
-
-Represent legal relationships explicitly:
-
-- original invoice;
-- modifying/corrective invoice;
-- cancellation/storno document;
-- advance and final invoice relationship, when supported;
-- replacement or revision relationship, when supported by approved policy.
-
-Each correcting or cancelling document:
-
-- receives its own final number from the applicable series or external authority;
-- has its own canonical PDF;
-- has its own NAV submission;
-- references the original invoice explicitly;
-- preserves a complete chain visible in the UI, API, and exports.
-
-Never implement “edit issued invoice” as a shortcut.
+Issued invoices are immutable. Model original, corrective or modifying, cancellation or storno, advance-to-final, and approved replacement or revision relations. Each new legal document gets a NAVRelay-managed number, canonical PDF, NAV submission, and explicit link to the original. Preserve the chain in the UI, API, and exports; never edit an issued row.
 
 ## 21. Public API design
 
-Use versioned REST endpoints under `/v1` and generate OpenAPI from NestJS.
+Use versioned REST under `/v1` and generate OpenAPI from NestJS. Billingo `/v3` is a boundary adapter over the same application services, never a second engine or source of domain rules.
 
-A baseline resource design is:
+Baseline resources:
 
 ```text
 /v1/organizations
@@ -777,654 +511,287 @@ A baseline resource design is:
 /v1/invoices/{invoiceId}/document
 /v1/invoices/{invoiceId}/nav-submissions
 /v1/invoices/{invoiceId}/relations
-/v1/document-uploads
+/v1/invoices/{invoiceId}/render-requests
+/v1/invoice-render-requests/{renderRequestId}
+/v1/invoice-render-requests/{renderRequestId}/document
+/v1/invoice-render-requests/{renderRequestId}/finalize
 /v1/audit-shares
 /v1/exports
 /webhooks/stripe
 ```
 
-The exact routes may evolve, but the resource boundaries must remain clear.
+Routes may evolve, but resource boundaries must stay clear.
 
 ### API requirements
 
-- JSON request/response bodies except for explicit upload/download endpoints.
-- OpenAPI-generated examples and error schemas.
-- Machine-readable error codes plus localized human messages.
-- Cursor pagination for large collections.
-- Stable filters for date range, series, number, customer, source, business state, and NAV state.
-- Request/correlation IDs.
-- Explicit API versioning and deprecation policy.
+- JSON except explicit uploads and downloads.
+- Generated examples, error schemas, machine-readable codes, and localized messages.
+- Cursor pagination and stable filters for date, series, number, customer, source, business state, and NAV state.
+- Request and correlation IDs, versioning, and deprecation policy.
 - No `any` request bodies.
-- No implicit tenant selected solely from request content.
+- Native issuance DTOs contain no caller-controlled series or configuration, final number, sequence, or numbering mode. Compatibility block IDs may only resolve a preconfigured organization mapping.
+- Derive tenant scope from authentication, never request content.
 
 ## 22. Idempotency
 
-Require `Idempotency-Key` for externally initiated write operations that may issue a document, create a payment-linked invoice, start an export, or create a share.
+Require `Idempotency-Key` for caller writes that may issue a document, create a payment-linked invoice, start an export, or create a share. Store organization and principal, method and normalized route, key, request hash, status and result, safe response code and body, creation time, and expiry. The same hash returns the original result; a different hash conflicts.
 
-Persist at least:
+Never persist plaintext render tokens or replay them. If an issuance response loses its token, create a new render attempt for the same locked invoice and number.
 
-- organization/principal;
-- HTTP method and normalized route;
-- key;
-- request hash;
-- status;
-- resulting resource ID;
-- response code and safe response body;
-- creation and expiry timestamps.
+Enforce unique `(organizationId, stripeEventId)`, `(organizationId, stripeInvoiceId)`, `(organizationId, sourceSystem, sourceTransactionId)`, `(organizationId, invoiceNumber)`, and `(navConnectionId, logicalSubmissionId)`. Provider IDs are source and idempotency references only, never invoice numbers.
 
-If the same key is reused with a different request hash, return a conflict. If it is reused with the same request, return the original result.
+## 23. Stripe
 
-Also enforce unique source constraints such as:
+Stripe is an optional adapter for payment state, source data, and tax evidence. It never owns a NAVRelay series, final number, or canonical PDF. Never fetch or import Stripe `invoice_pdf` or receipts as invoice documents.
 
-- `(organizationId, stripeEventId)`;
-- `(organizationId, stripeInvoiceId)`;
-- `(organizationId, externalSource, externalInvoiceId)`;
-- `(organizationId, invoiceNumber)`;
-- `(navConnectionId, logicalSubmissionId)`.
+### Issuer workflow
 
-## 23. Stripe integration
+The initial Stripe workflow is `PAYMENT_TRIGGERED_NAVRELAY`:
 
-Stripe is optional and isolated behind a provider module. Webhook subscription is the primary event-delivery mechanism, backed by reconciliation so missed or delayed events can be repaired.
+1. Durably persist and deduplicate the event.
+2. In the worker, fetch and verify authoritative payment and transaction data.
+3. Map the facts through an approved tax profile.
+4. Call the managed issuance service used by `/v1`.
+5. NAVRelay resolves the server-side series, allocates the number, and uses `NAVRELAY_RENDERED` or `TRUSTED_CLIENT_RENDERED`.
+6. Store Stripe IDs only as source, payment, reconciliation, and idempotency references.
 
-### Stripe workflow selection
+Choose the tax source, series policy, and renderer mode explicitly per integration. Never infer them from event arrival order.
 
-Each Stripe integration selects an explicit issuer workflow and tax source. These are separate decisions and must never be inferred from whichever webhook happens to arrive first.
+### Tax sources
 
-#### Issuer workflows
+1. `NAVRELAY_TAX_PROFILE`: enabled, versioned, and the default for the initial narrow Hungarian cases.
+2. `STRIPE_TAX`: store the full calculation and evidence and map it only through an approved profile. It is not legal approval, tax registration or filing, or permission to infer unrestricted EU, OSS, exemption, or reverse-charge treatment.
 
-1. `PAYMENT_TRIGGERED_NAVRELAY`
-   - Stripe is the payment source for a one-off purchase.
-   - After authoritative payment success, NAVRelay performs the normal managed-issuance workflow: it validates the configured tax profile, allocates the invoice number, renders the PDF, stores it, and reports it to NAV.
-   - This is the default Stripe mode for the initial product because NAVRelay retains full control over Hungarian invoice content and numbering.
+Allow `STRIPE_TAX` only with managed issuance and tested profiles.
 
-2. `STRIPE_FINALIZED_INVOICE_IMPORT`
-   - Stripe owns the invoice lifecycle, final invoice number, line and tax snapshot, and rendered PDF.
-   - NAVRelay subscribes to Stripe invoice events, fetches the authoritative finalized Invoice object and PDF, validates an approved Stripe document profile, stores the exact bytes, and reports normalized data to NAV.
-   - This is most useful for Stripe Billing subscriptions, prorations, and other cases where Stripe already owns the billing lifecycle.
-   - It is opt-in per organization and invoice profile, not enabled globally.
+### Webhooks and event policy
 
-Do not mix Stripe-owned and NAVRelay-owned invoice numbering within one invoice series. A Stripe-finalized invoice is view-only after import; corrections use explicit linked correction workflows rather than the NAVRelay invoice editor.
+Verify the raw body and signature before parsing, durably deduplicate before acknowledgement, and process fetched authoritative objects in the worker. Store applicable account, customer, Checkout Session, PaymentIntent, charge, subscription, invoice, credit note, tax calculation, and API-version IDs. Ignore Stripe invoice numbers and PDFs. Handle duplicates, retries, delayed methods, reordering, and bounded reconciliation without issuing twice.
 
-#### Tax sources
+Require verified payment success. For Checkout, retrieve the Session, verify payment status, support successful asynchronous methods, and uniquely link the Session and PaymentIntent.
 
-1. `NAVRELAY_TAX_PROFILE`
-   - NAVRelay applies a deliberately enabled, versioned tax profile.
-   - This is the default for managed issuance and the initial narrow set of supported Hungarian scenarios.
+For approved Stripe Billing flows:
 
-2. `STRIPE_TAX`
-   - Stripe Tax calculates the transaction tax and supplies customer-location and tax-result evidence.
-   - NAVRelay persists the complete calculation result and maps it only through an approved profile before NAV reporting.
-   - Stripe Tax output is a calculation input, not legal approval, not a substitute for tax registration or filing, and not permission to infer unrestricted EU, OSS, exemption, or reverse-charge behavior.
+- `invoice.paid` may trigger exactly one NAVRelay-managed invoice;
+- `invoice.finalized` updates provider state or reconciliation only; it never imports or creates a canonical document;
+- `invoice.payment_failed` updates payment state; it never issues or changes a canonical invoice;
+- `invoice.voided`, `credit_note.created`, refunds, and disputes enter explicit correction or reconciliation flows and are not automatically Hungarian storno or modifying invoices.
 
-For the initial release, allow `STRIPE_TAX` with `STRIPE_FINALIZED_INVOICE_IMPORT` only for specifically tested profiles. Do not build the product around the assumption that every Stripe Tax result can be translated automatically into a valid Hungarian invoice and NAV payload.
+Checkout and Billing events for one transaction must converge through source uniqueness and idempotency.
 
-### Webhook rules
+### Initial recommendation
 
-- Verify the raw request body and Stripe signature before parsing or persisting business data.
-- Store and deduplicate the Stripe event ID before acknowledging it.
-- Return success quickly after durable persistence; perform Stripe fetches, PDF downloads, validation, and invoice processing in the worker.
-- Fetch authoritative objects from Stripe rather than trusting expandable webhook fragments.
-- Preserve Stripe account, customer, checkout session, payment intent, charge, subscription, invoice, credit-note, tax-calculation, and API-version identifiers as applicable.
-- Handle duplicate delivery, retries, delayed payment methods, and event reordering.
-- Do not issue an invoice twice when payment and invoice events both exist for one economic transaction.
-- Run a bounded reconciliation job that identifies relevant Stripe objects or events not yet represented in NAVRelay.
-
-### Event policy
-
-For `PAYMENT_TRIGGERED_NAVRELAY`:
-
-- Use an authoritative successful-payment state, not webhook delivery alone, as the issuance precondition.
-- For Checkout, verify the retrieved Session and its payment status; support asynchronous payment methods through their successful-payment event path.
-- Persist a unique relation to the Stripe Checkout Session and PaymentIntent so retries cannot issue another invoice.
-
-For `STRIPE_FINALIZED_INVOICE_IMPORT`:
-
-- `invoice.finalized` is the canonical document-import trigger because the invoice has reached its finalized lifecycle state.
-- `invoice.paid` updates payment state; it is not a second issuance trigger.
-- `invoice.payment_failed` updates operational/payment state without changing the canonical invoice.
-- `invoice.voided`, `credit_note.created`, refunds, and disputes enter explicit correction/reconciliation workflows. Never assume a Stripe void, credit note, or refund is automatically equivalent to a Hungarian storno or modifying invoice.
-- For one-time Checkout invoicing, enable post-payment invoice creation only when the organization deliberately accepts Stripe's invoice pricing and the selected document profile has passed compliance validation.
-
-### Initial product recommendation
-
-- Keep the generic Swagger API and NAVRelay-generated invoices as the core product.
-- Treat the Nuxt invoice editor as an optional first-party API client.
-- Support provided-PDF import independently of Stripe.
-- Make payment-triggered NAVRelay issuance the default one-off Stripe workflow.
-- Add Stripe-owned Invoice plus Stripe Tax import as a narrow, opt-in subscription-oriented adapter after sample PDFs, tax outputs, corrections, and NAV mappings pass automated tests and professional compliance review.
-- Keep provider pricing outside the invoice domain model; changing provider mode must never rewrite historical invoices.
+Keep the Nuxt editor and trusted renderer as first-party API clients. Start with payment-triggered one-off issuance. Add subscription triggers or Stripe Tax only after source-data, tax, correction, and NAV tests plus professional compliance approval. Provider pricing stays outside the invoice domain, and configuration changes never rewrite history.
 
 ## 24. Audit log
 
-Maintain an append-only audit log for security- and compliance-relevant actions.
+Keep an append-only security and compliance audit log. Each event stores organization, actor type and ID, action, resource type and ID, time, request or correlation ID, applicable user agent, redacted configuration before and after data, outcome, and reason or source.
 
-Each event should include:
-
-- organization;
-- actor type and actor ID;
-- action code;
-- resource type and ID;
-- timestamp;
-- request/correlation ID;
-- user agent where appropriate;
-- before/after metadata for mutable configuration, with secrets redacted;
-- success/failure outcome;
-- reason or originating integration.
-
-Log at least:
-
-- login and failed login;
-- membership and role changes;
-- API-key creation, rotation, and revocation;
-- NAV credential changes and connection tests;
-- invoice creation, issue, correction, cancellation, and attempted forbidden edits;
-- document upload, canonicalization, integrity verification, and download;
-- NAV submission attempts and final outcomes;
-- audit-share creation, access, expiry, and revocation;
-- export creation and download;
-- retention or deletion actions.
-
-Application logs are not a substitute for the domain audit log.
+Log successful and failed login; membership and role changes; API-key creation, rotation, and revocation; NAV credentials and connection tests; invoice lifecycle and forbidden edits; render requests, handbacks, canonicalization, integrity checks, and downloads; NAV attempts and results; share creation, access, expiry, and revocation; export creation and download; retention; and deletion. Application logs do not replace this log.
 
 ## 25. Audit access by login
 
-Authenticated auditors use Better Auth and organization-scoped membership.
+Authenticated Better Auth organization members with auditor access can filter by date, number, series, source, customer, business state, and NAV state; view or download canonical PDFs; view normalized data and safe NAV results; follow relations; and access permitted exports, hashes, integrity status, and, where authorized, access history.
 
-The audit UI must support:
-
-- date and invoice-number filters;
-- invoice series filters;
-- source and customer filters;
-- business and NAV-status filters;
-- canonical PDF viewing/downloading;
-- normalized invoice-data viewing;
-- safe NAV result viewing;
-- relation-chain viewing;
-- export creation where permitted;
-- integrity hash and verification status;
-- access-history visibility for privileged roles.
-
-Auditors never receive permission to modify invoice data, series counters, NAV credentials, or canonical documents.
+Auditors cannot modify invoices, series counters, NAV credentials, or canonical documents.
 
 ## 26. Audit access by share link
 
-Support revocable, scoped audit-share links without creating a full user account.
+Support revocable accountless links. `AuditShare` stores organization, creator, immutable scope, optional date, number, or series limits, allowed fields and actions, expiry, optional password hash and download limit, revocation, access times, and access log.
 
-An `AuditShare` must define:
-
-- organization;
-- creator;
-- immutable resource scope;
-- optional date range;
-- optional invoice-number/series range;
-- allowed fields and actions;
-- expiry;
-- optional password hash;
-- optional download limit;
-- revoked timestamp;
-- first and last access;
-- access log.
-
-Security requirements:
-
-- use a high-entropy opaque token;
-- store only a secure token hash;
-- show the plaintext token once;
-- support immediate revocation;
-- default to short expiry;
-- set `noindex` and a restrictive referrer policy;
-- rate-limit token and password attempts;
-- never expose raw S3 credentials;
-- issue short-lived presigned object URLs only after share-scope validation;
-- never expose secret-bearing NAV requests or unrestricted organization data.
-
-A share link is a convenience and audit-delivery mechanism, not the only statutory export capability.
+Use high-entropy opaque tokens stored only as hashes and shown once; support immediate revocation and short expiry; set `noindex` and a restrictive referrer policy; rate-limit token and password attempts; never expose S3 credentials, secret NAV requests, or unrestricted organization data; and authorize short-lived object URLs after scope checks. Shares do not replace statutory exports.
 
 ## 27. Exports
 
-Exports are asynchronous, immutable snapshots.
+Exports are asynchronous immutable snapshots. Support the required Hungarian statutory format, selected PDFs with safe metadata, and explicitly implemented accounting CSV or XML formats.
 
-Support at least:
-
-1. **Statutory audit export** implemented against the current required Hungarian format.
-2. **Convenience archive export** containing selected PDFs and safe metadata.
-3. **Accounting export** in configured CSV/XML formats where explicitly implemented.
-
-A convenience ZIP may look like:
+Example:
 
 ```text
 export.zip
 ├─ manifest.json
-├─ invoices/
-│  ├─ {invoiceId}.pdf
-│  └─ ...
-├─ metadata/
-│  ├─ invoices.jsonl
-│  └─ relations.jsonl
-└─ nav/
-   ├─ results.jsonl
-   └─ safe-receipts/
+├─ invoices/{invoiceId}.pdf
+├─ metadata/invoices.jsonl
+├─ metadata/relations.jsonl
+├─ nav/results.jsonl
+└─ nav/safe-results/
 ```
 
-The manifest must include:
+The manifest records export ID, organization, filter snapshot, creation time, creator or share identity, invoice IDs and numbers, hashes and sizes, app version, and format version. Only temporary export objects may expire, on a configurable schedule; source invoices and canonical documents may not.
 
-- export ID;
-- organization;
-- filter snapshot;
-- creation time;
-- creator or share identity;
-- included invoice IDs and numbers;
-- file hashes and sizes;
-- application version;
-- export-format version.
+## 28. Email
 
-Temporary export objects may expire after a configurable period. Their source invoices and canonical documents must not expire with them.
+Use ZeptoMail behind a backend abstraction. Follow organization link or attachment policy, localize templates, use a download endpoint or short-lived signed URL, record attempts and provider IDs, and retry without regenerating or replacing PDFs. Email is delivery, not archival storage.
 
-## 28. Email delivery
+## 29. Privacy and security
 
-Use ZeptoMail through a backend abstraction.
-
-- Send invoice links or attachments according to organization policy.
-- Use localized templates.
-- Do not expose permanent S3 URLs.
-- Use a customer-facing download endpoint or short-lived signed URL.
-- Record delivery attempts and provider message IDs.
-- Retrying email must not regenerate or replace the invoice PDF.
-- Email is delivery, not archival storage.
-
-## 29. Data privacy and security
-
-Invoice data can contain personal, financial, and tax information.
-
-Mandatory controls:
-
-- validate all external input;
-- encrypt secrets at rest;
-- use TLS for all external communication;
-- keep S3 buckets private;
-- use least-privilege S3 credentials;
-- hash API keys and audit-share tokens;
-- redact authorization headers, cookies, passwords, keys, signatures, raw invoice payloads, and customer PII from application logs;
-- rate-limit public and machine endpoints;
-- protect login and exposed forms against abuse;
-- implement secure webhook verification;
-- prevent SSRF in external-PDF fetching;
-- allowlist supported external hosts and enforce response-size/content-type limits;
-- use malware scanning for public uploads;
-- validate authorization again at download time;
-- never trust browser-calculated totals, tax, roles, or ownership;
-- document data-processing roles for hosted SaaS operation;
-- support data-subject workflows without violating mandatory invoice retention.
+Invoice data is sensitive. Validate inputs; encrypt secrets and use TLS; keep S3 private with least-privilege credentials; hash API keys, share tokens, and render tokens; redact authorization headers and cookies, passwords, keys, signatures, raw invoice payloads, and customer PII from logs; rate-limit public and machine endpoints and protect login and forms; verify webhooks; allowlist provider hosts, prevent SSRF, and enforce fetch size and content-type limits; reject remote PDFs and accept renderer bytes only through scoped requests; malware-scan public uploads; reauthorize downloads; distrust browser totals, tax, roles, and ownership; document hosted-SaaS processing roles; and support data-subject requests without breaking retention.
 
 ## 30. Background jobs
 
-Use a durable queue. The default may be PostgreSQL-backed to avoid an unnecessary Redis dependency, but it must support safe multi-worker claiming, retries, scheduling, and dead-letter/manual-review states.
+Use a durable queue with safe multi-worker claims, retries, scheduling, and dead-letter or manual-review states. PostgreSQL is the default unless Redis is needed.
 
-Required job types include:
+Required jobs include NAVRelay PDF rendering; trusted-client render dispatch, timeout, retry, and returned-PDF verification and canonicalization; NAV submission and status lookup; email; exports; integrity checks; staging and export expiry; stuck-workflow reconciliation; and Stripe synchronization.
 
-- render generated PDF;
-- verify/promote provided PDF;
-- submit invoice to NAV;
-- query NAV transaction status;
-- send invoice email;
-- build export;
-- verify stored-document integrity;
-- expire staged uploads and exports;
-- reconcile stuck workflows;
-- Stripe object synchronization when needed.
+The API may enqueue but must not run an untracked memory queue. Worker loops live in `apps/worker` and may keep that service awake.
 
-The API process may enqueue jobs but must not run an untracked in-memory queue. Worker loops belong in `apps/worker` and may keep that Railway service awake.
+## 31. Transactional outbox
 
-## 31. Transactional outbox and workflow reliability
+When a database change requires later work, commit the domain change and job or outbox row in one PostgreSQL transaction. This includes number and snapshot allocation plus a render job or request, a received Stripe event plus invoice-processing work, and a final NAV result plus delivery or notification.
 
-When a database state transition requires asynchronous external work, write the domain change and outbox/job record in the same PostgreSQL transaction.
+No transaction spans PostgreSQL, S3, and NAV. Upload, validate, hash, and promote unchanged bytes to a new canonical S3 key first. Then, in one PostgreSQL transaction, lock the invoice and active render attempt, record canonical object metadata, move the invoice to `ISSUED`, and insert the NAV outbox row. NAV calls happen later. Reconciliation must recover an orphaned S3 object or an interrupted database finalization without replacing bytes or submitting early.
 
-Examples:
+A crash after commit must not lose work. A retry must not duplicate the domain action.
 
-- issuing an invoice and enqueueing PDF generation;
-- canonicalizing a PDF and enqueueing NAV submission;
-- receiving a Stripe event and enqueueing invoice processing;
-- accepting a final NAV result and enqueueing delivery/notification.
+## 32. Frontend
 
-A process crash after commit must not lose the required external action. A retry must not duplicate the domain action.
+Use Nuxt, Nuxt UI, Tailwind, and Nuxt i18n. Initial areas:
 
-## 32. Frontend requirements
+- organization switcher, dashboard, and alerts;
+- invoices, details, drafts, and `NAVRELAY_RENDERED` or `TRUSTED_CLIENT_RENDERED` flows;
+- series, blocks, customers, members, roles, API clients, keys, renderer profiles, and trusted identities;
+- NAV connection and status, Stripe, audit logs and shares, exports, storage and integrity, and organization and retention settings.
 
-Use Nuxt, Nuxt UI, Tailwind, and Nuxt i18n.
-
-Initial application areas:
-
-- organization switcher;
-- dashboard and operational alerts;
-- invoices and invoice details;
-- draft/generated/provided invoice flows;
-- series/invoice-block management;
-- customers;
-- organization members and roles;
-- API clients and keys;
-- NAV connection setup and status;
-- Stripe integration setup;
-- audit logs;
-- audit shares;
-- exports;
-- storage/integrity status;
-- organization and retention settings.
-
-All user-facing text must be translated. English and Hungarian are the initial locales, with English as fallback unless the repository explicitly changes that decision.
-
-The UI consumes generated business API clients. Do not duplicate authorization or legal rules in client-only code.
+Translate all user text, starting with English and Hungarian and using English fallback unless the repository changes this. Use generated business clients. Client code must not duplicate authorization or legal rules.
 
 ## 33. OpenAPI and SDKs
 
-NestJS controllers and DTOs are the source of truth for OpenAPI.
+NestJS controllers and DTOs define OpenAPI. Commit the generated document per repository convention; generate the Nuxt client with `nuxt-open-fetch`; keep generated code separate and unedited; publish a TypeScript SDK only after API stabilization; review compatibility and release notes for public changes; and make `pnpm run verify` detect contract drift.
 
-- Generate and commit the OpenAPI document if that is the repository convention.
-- Generate the Nuxt client through `nuxt-open-fetch`.
-- Keep generated code separate and never hand-edit it.
-- Consider generated TypeScript SDK publication only after the public API stabilizes.
-- Public API changes require compatibility review and release notes.
-- `pnpm run verify` must detect stale generated contracts.
+## 34. Database
 
-## 34. Database conventions
+Use MikroORM's Data Mapper, Identity Map, and Unit of Work with PostgreSQL integration tests, generated migrations for every schema change, and production schema synchronization disabled. Use explicit transactions for issuance, allocation, outbox creation, and other atomic work; prefer `EntityManager` and repositories. Limit raw SQL or QueryBuilder to narrow, documented concurrency needs such as `FOR UPDATE SKIP LOCKED`. Map entities to public DTOs; never return raw entities.
 
-Use MikroORM's Data Mapper, Identity Map, and Unit of Work correctly.
+## 35. Testing
 
-- PostgreSQL is the real database in development integration tests.
-- Use generated MikroORM migrations for every schema change.
-- Keep production schema synchronization disabled.
-- Use explicit transactions for issuance, sequence allocation, outbox creation, and other atomic workflows.
-- Use high-level `EntityManager`/repository APIs whenever practical.
-- Narrow raw SQL or QueryBuilder usage is acceptable for PostgreSQL concurrency primitives such as `FOR UPDATE SKIP LOCKED`, but isolate it and document why it is necessary.
-- Do not return raw entities as public API responses.
-- Use DTOs and explicit mappings.
-
-## 35. Testing requirements
-
-Prefer behavioral and integration coverage over isolated mocks.
+Prefer behavior and integration tests over isolated mocks.
 
 ### Mandatory critical tests
 
-- Better Auth organization creation, invitation acceptance, multi-organization switching, and organization-scoped role changes behave as configured;
-- retained domain data prevents destructive organization deletion;
-- a machine API request with a valid scoped API key succeeds and an invalid, expired, revoked, or insufficiently scoped key is denied;
-- machine writes enforce rate limits and idempotency without weakening organization isolation;
-- a Stripe webhook fails on an invalid signature and a duplicate valid event remains idempotent;
-- two concurrent requests cannot allocate the same managed invoice number;
-- an idempotent retry returns the same issued invoice;
-- a duplicate Stripe webhook does not create another invoice;
-- out-of-order `invoice.finalized` and `invoice.paid` events converge to one invoice and correct payment state;
-- a Stripe Invoice that fails its configured document/tax profile is not issued or reported silently;
-- the same external invoice ID cannot be imported twice;
-- cross-tenant invoice and document access is denied;
-- issued invoice data cannot be edited;
-- canonical S3 objects cannot be replaced through application APIs;
-- the stored hash matches exact uploaded/generated bytes;
-- a supplied PDF remains byte-for-byte unchanged;
-- S3 failure leaves a recoverable workflow, not a false issued-and-delivered state;
-- NAV timeout and temporary failure produce a durable retry;
-- NAV permanent validation errors enter manual review without duplicate issuance;
-- a NAV transaction ID is not treated as final acceptance;
-- audit-link scope, expiry, password, and revocation are enforced;
-- export manifests match included documents and hashes;
-- correction/cancellation chains remain intact;
-- API keys cannot cross organization boundaries;
-- retention prevents deletion;
-- secrets and PII are redacted from logs.
+- Better Auth organization creation, invitation acceptance, multi-organization switching, scoped roles, and retained-data deletion blocks.
+- Valid scoped API keys work; invalid, expired, revoked, or under-scoped keys fail. Machine writes enforce rate limits, idempotency, and tenant isolation.
+- Stripe signature failures, duplicate or reordered events, and source-transaction deduplication converge to one managed invoice; `invoice.finalized` alone never issues, and invalid source or tax data fails closed.
+- Managed allocation is concurrency-safe; native requests cannot supply series or configuration, numbering mode, sequence, or final number; compatibility block IDs resolve only preconfigured organization series; every number belongs to an authorized managed series; identical retries return the same invoice.
+- Render packages contain the server number and immutable invoice and series snapshots. Attempt tokens are shown once, hashed, unlogged, retry-safe, and scoped to organization, invoice, snapshot, renderer, content, size, and expiry.
+- Renderer callbacks are idempotent: identical bytes return the original result, conflicting bytes fail, and lost responses or expired tokens recover without another number. A replacement attempt atomically supersedes the old active attempt. Superseded, expired, failed, cross-tenant, and late callbacks fail; only one attempt finalizes.
+- Invalid, encrypted, or snapshot-mismatched PDFs fail closed. Renderer identity, profile version, trust boundary, and required validation are enforced. Timeout or failure is audited, stays visible for sequence review, never releases the number, and retries only the same snapshot.
+- Cross-tenant invoice or document access fails. Issued data and canonical objects cannot be edited or replaced. Hashes match exact generated or renderer-returned bytes, and trusted-client PDFs stay byte-for-byte unchanged.
+- Presigned staging cannot canonicalize before finalization, which verifies the exact staged bytes. S3 failure leaves recoverable state, not false issuance or delivery.
+- Canonical metadata, `ISSUED`, and the NAV outbox commit atomically after S3 canonicalization; NAV cannot start before canonical bytes and required hashes exist, and no NAV call runs in that transaction.
+- NAV temporary failures retry durably; permanent errors enter manual review without duplicate issuance; transaction IDs are not final acceptance.
+- Audit-share scope, expiry, password, and revocation; export manifests; correction chains; retention blocks deletion; and log redaction work.
+- OpenAPI, generated clients, and docs expose no external-number or finalized-document import path.
 
 ### Test tools
 
-- Vitest across frontend and backend.
-- Supertest and `@nestjs/testing` for HTTP/API E2E tests.
-- Testcontainers PostgreSQL.
-- A real S3-compatible test service such as MinIO in integration tests where byte behavior matters.
-- Provider mocks at the NAV, Stripe, email, and production-S3 boundaries.
-- Official NAV XML/XSD fixtures and project-owned golden files.
-- Opt-in live contract tests against the NAV test environment; never run these as an uncontrolled default test suite.
-- Playwright across Chromium, Firefox, and WebKit with isolated application/database lanes for mutating tests.
+Use Vitest; Supertest and `@nestjs/testing`; Testcontainers PostgreSQL; MinIO or another real S3-compatible service; NAV, Stripe, email, and S3 adapter mocks; official NAV XML/XSD fixtures and project golden files; opt-in NAV test-environment contract tests; and Playwright on Chromium, Firefox, and WebKit with isolated mutating-test lanes.
 
-## 36. Verification command
+## 36. Verification
 
-The repository root must expose:
+The root must expose `pnpm run verify`, covering lint and format, TypeScript, backend and frontend tests, PostgreSQL and S3 integration, concurrency and idempotency, OpenAPI drift, locale completeness, production builds, and Playwright E2E. Claim full verification only when it passes; report skipped or blocked suites exactly.
 
-```bash
-pnpm run verify
-```
+### GitHub Actions gate
 
-It must run every applicable release-quality check, including:
+Create `.github/workflows/verify.yml` with stable job and check name `verify`. Run it on `pull_request`, protected-default-branch pushes, and `merge_group` when used. Use read-only permissions, pinned Node and pnpm, `pnpm install --frozen-lockfile`, required Playwright dependencies, and unchanged `pnpm run verify` on GitHub-hosted Linux with Docker and Testcontainers. Never expose organization or production secrets to PR code. Mock NAV, Stripe, email, and S3 at adapter boundaries in PRs; run live NAV checks separately through trusted `workflow_dispatch` or scheduled protected-branch workflows with test credentials, never untrusted forks. Cancel superseded runs, require `verify` on the default branch, and gate Railway auto-deploys to the verified commit SHA.
 
-- linting and formatting checks;
-- TypeScript checks;
-- backend tests;
-- frontend tests;
-- PostgreSQL integration tests;
-- storage integration tests;
-- invoice concurrency/idempotency tests;
-- OpenAPI generation and drift checks;
-- locale completeness checks;
-- production builds;
-- Playwright E2E matrix.
+## 37. Railway
 
-Do not claim a change is fully verified unless this command succeeds. Report exact skipped or blocked suites.
-
-### GitHub Actions pull-request gate
-
-Create `.github/workflows/verify.yml` with a stable job/check name of `verify`.
-
-- Trigger it for `pull_request`, pushes to the protected default branch, and `merge_group` when merge queue is enabled.
-- Use read-only repository permissions by default.
-- Pin the repository Node.js and pnpm versions, install with `pnpm install --frozen-lockfile`, install required Playwright/browser dependencies, and run `pnpm run verify` unchanged.
-- GitHub-hosted Linux runners are the initial default because the suite requires Docker/Testcontainers. Do not expose organization or production secrets to pull-request code.
-- Mock NAV, Stripe, email, and production S3 at their adapter boundaries in the mandatory PR workflow.
-- Keep live NAV test-environment contract tests in a separate trusted workflow, such as manual `workflow_dispatch` and/or a scheduled protected-branch run. It may use only NAV test credentials and must never be required for untrusted fork PRs.
-- Configure concurrency so a superseded run for the same PR is cancelled.
-- Protect the default branch so `verify` must pass before merge.
-- When Railway deploys from GitHub automatically, enable its CI/deployment gate so the verified commit SHA, not an earlier or later revision, is released.
-
-## 37. Railway behavior
-
-Follow the default-stack Railway conventions:
-
-- use private networking between Nuxt, NestJS, worker, and PostgreSQL;
-- run MikroORM migrations in the pre-deploy command, not on every start;
-- use bounded database wake-up retries;
-- keep connection pools small with finite idle timeouts;
-- avoid keepalive traffic in services intended to sleep;
-- keep durable polling and continuously scheduled jobs in the separate worker service;
-- expose cheap readiness endpoints that do not query the database on every probe;
-- store secrets only in server-side Railway variables or an approved secret manager;
-- do not use local working-tree uploads as the production deployment path.
+Use private networking between Nuxt, NestJS, worker, and PostgreSQL; run MikroORM migrations pre-deploy, not every start; use bounded database wake-up retries, small pools, finite idle timeouts, no keepalive for sleeping services, durable worker polling and schedules, readiness endpoints without per-probe database queries, and server-side Railway variables or an approved secret manager. Never upload a local working tree as the production deployment path.
 
 ## 38. Observability
 
-Use structured JSON logs in production and readable logs in development.
-
-Include:
-
-- service name;
-- environment;
-- request/correlation ID;
-- organization ID where safe;
-- resource IDs;
-- job ID;
-- NAV transaction ID where safe;
-- outcome and duration;
-- retry attempt and next retry time.
-
-Never log:
-
-- NAV credentials;
-- Stripe webhook secrets or API keys;
-- API-key plaintext;
-- audit-share tokens;
-- authorization headers or cookies;
-- full invoice/customer bodies;
-- raw canonical PDF bytes;
-- unredacted NAV requests if they contain sensitive authentication material.
-
-Create operational views or alerts for:
-
-- invoices missing canonical documents;
-- NAV submissions stuck in processing;
-- rejected submissions;
-- expiring/invalid NAV credentials;
-- failed email deliveries;
-- S3 integrity failures;
-- dead-letter jobs;
-- sequence-allocation conflicts;
-- unexpectedly high duplicate/idempotency conflicts.
+Use structured JSON logs in production and readable development logs. Include service, environment, request or correlation ID, safe organization and resource IDs, job ID, safe NAV transaction ID, outcome, duration, attempt, and next retry. Never log credentials, secrets, keys, tokens, authorization headers or cookies, full invoice or customer bodies, PDF bytes, or unredacted authenticated NAV requests. Alert on stuck `ISSUING` invoices; stuck, failed, or expired render requests; missing canonical documents; stuck or rejected NAV jobs; expiring or invalid credentials; failed email; S3 integrity failures; dead letters; sequence conflicts; and abnormal duplicate or idempotency conflicts.
 
 ## 39. Self-hosted and hosted editions
 
-The same core application should support:
-
-- self-hosted single-organization use;
-- self-hosted multi-organization use;
-- hosted multi-tenant SaaS.
-
-Do not fork compliance logic between editions. Feature entitlements may differ, but issuance, hashing, storage, NAV mapping, tenant isolation, and audit behavior must use the same tested core.
-
-Self-hosting must support externally supplied:
-
-- PostgreSQL URL;
-- S3 endpoint, region, bucket, and credentials;
-- public web/API URLs;
-- Better Auth secret and trusted origins;
-- encryption master key or KMS integration;
-- NAV environment configuration;
-- email provider configuration;
-- optional Stripe configuration.
-
-Do not silently fall back to local durable document storage when S3 is unavailable.
+Use the same tested core for self-hosted single-organization, self-hosted multi-organization, and hosted SaaS. Entitlements may differ; issuance, hashing, storage, NAV mapping, tenancy, and audit behavior may not. Self-hosting accepts a PostgreSQL URL; S3 endpoint, region, bucket, and credentials; public web and API URLs; Better Auth secret and trusted origins; encryption key or KMS; NAV environment; email provider; and optional Stripe settings. Never fall back to local durable storage when S3 fails.
 
 ## 40. Commercial and open-source constraints
 
-NAVRelay is intended to remain open-source while also being commercially operable as a hosted service.
+Keep core features provider-neutral, open-source, and viable for hosting. Avoid licenses that block distribution or hosting and record third-party licenses; do not choose the project license until the owner decides; keep AGPL, open-core, and dual licensing possible; and do not depend on undocumented private hosted-only features.
 
-- Keep core functionality provider-neutral.
-- Avoid dependencies whose licenses prevent the intended distribution or hosted model.
-- Record third-party licenses.
-- Do not add a project license automatically unless the owner explicitly selects one.
-- Preserve the possibility of an AGPL/open-core or dual-license strategy, but treat the final license as an unresolved product decision.
-- Do not make the hosted service dependent on undocumented private behavior that the self-hosted edition cannot reproduce.
+## 41. Initial non-goals
 
-## 41. Non-goals for the initial product
+Do not add these without an explicit scope change:
 
-Unless explicitly added later, do not expand the initial scope into:
-
-- full general-ledger accounting;
-- payroll;
-- inventory/warehouse management;
+- general-ledger accounting, payroll, inventory, or warehouse management;
 - banking reconciliation beyond payment references;
-- a marketplace of tax advisers;
-- unsupported country-specific invoicing regimes;
-- arbitrary PDF editing;
-- OCR-based invoice ingestion as a source of legal truth;
-- direct access to users' S3 credentials from the browser;
-- replacing an accountant or tax adviser with inferred tax logic.
+- tax-adviser marketplaces, unsupported country regimes, or inferred tax logic replacing an accountant;
+- externally numbered or finalized third-party invoice imports, caller-assigned numbers or series, or Stripe PDFs or receipts as canonical documents;
+- arbitrary PDF editing or OCR as legal truth;
+- browser access to user S3 credentials.
 
-## 42. Initial supported product slice
+## 42. Initial product slice
 
-The first production-capable slice should include:
+The first production-capable slice includes:
 
-1. Better Auth organizations, invitations, memberships, static organization roles, and separate machine API keys.
-2. Managed and external invoice series.
-3. Generated PDF issuance.
-4. Provided PDF ingestion.
-5. Private S3 canonical storage with hashes.
-6. Direct NAV test and production connections per organization.
-7. Durable NAV submission and final-status handling.
-8. Invoice listing, details, PDF download, and NAV diagnostics.
-9. Login-based auditor access.
-10. Scoped, expiring audit-share links.
-11. Date/number-range exports with manifests.
-12. Stripe webhook integration for one approved flow, with durable event storage and reconciliation.
-13. Public Swagger/OpenAPI documentation with scoped API-key authentication and rate limits.
-14. English and Hungarian UI/API messages.
-15. Full critical-path test coverage, mandatory GitHub Actions `verify`, and a required pull-request status check.
+1. Better Auth organizations, invitations, memberships, static roles, and separate machine keys.
+2. NAVRelay-managed series with atomic server allocation, `NAVRELAY_RENDERED`, and `TRUSTED_CLIENT_RENDERED` handback through scoped renderer profiles, requests, and tokens.
+3. Private S3 canonical storage, hashes, and integrity checks.
+4. Per-organization NAV test and production connections, durable submission, and final status.
+5. Invoice lists, details, downloads, and NAV diagnostics.
+6. Login-based auditor access, scoped expiring shares, and manifest-backed date or number exports.
+7. One approved Stripe-triggered managed-issuance flow with durable events and reconciliation.
+8. Public Swagger/OpenAPI, scoped API keys, rate limits, English and Hungarian UI/API messages, and full critical-path tests with mandatory GitHub Actions `verify`.
 
-Do not call the first slice production-ready until the legal/compliance checklist has been signed off and live test invoices have been validated in the NAV test environment.
+It is not production-ready until legal and compliance sign-off and live test invoices are validated in NAV's test environment.
 
-## 43. Definition of done for invoice issuance
+## 43. Invoice issuance definition of done
 
-An invoice-issuance feature is done only when all of the following hold:
+An issuance feature is done only when:
 
-- authorization and organization scope are enforced;
-- input is validated through typed DTOs;
-- totals use exact arithmetic;
-- idempotency is enforced;
-- the series/numbering rule is enforced;
-- an immutable issued snapshot exists;
-- a canonical PDF exists in S3;
-- its exact-byte hash and storage metadata are recorded;
-- the object cannot be replaced through normal APIs;
-- a durable NAV job exists or the approved policy says reporting is not required;
-- NAV state is visible and diagnosable;
-- audit events exist;
-- applicable delivery is queued;
-- generated OpenAPI/client output is current;
-- targeted tests and full `pnpm run verify` pass.
+- authorization, organization scope, typed DTO validation, and exact totals work;
+- idempotency and NAVRelay-managed allocation work; native callers cannot supply series identifiers or configuration, sequences, modes, or final numbers, and compatibility blocks only use preconfigured mappings;
+- the immutable snapshot, canonical S3 PDF, exact hash, and storage metadata exist and normal APIs cannot replace them;
+- trusted-client rendering, when used, is identity- and token-scoped, idempotent, and retryable only against the locked snapshot and number;
+- a durable NAV job or approved no-report policy exists; NAV state is visible and diagnosable, audit events exist, and applicable delivery is queued;
+- OpenAPI and client output are current, and targeted tests plus full `pnpm run verify` pass.
 
 ## 44. Prohibited shortcuts
 
-Do not:
+Never:
 
-- use Billingo or Számlázz.hu as a hidden backend;
-- store canonical PDFs only in Stripe;
-- store canonical PDFs only in PostgreSQL blobs;
-- use local disk as production archival storage;
-- replace canonical PDFs after issuance;
-- edit issued invoice rows in place;
-- reuse an invoice number;
-- allocate managed numbers outside a safe transaction;
-- mark NAV success after only receiving a transaction ID;
-- run NAV polling in the request process;
-- accept arbitrary remote PDF URLs;
-- accept a Stripe receipt as an invoice;
-- accept a Stripe Invoice PDF without a validated profile;
-- expose public S3 buckets or permanent object URLs;
-- use S3 ETag as the legal/integrity hash;
-- log raw secrets or invoice bodies;
-- rely on frontend authorization;
-- silently guess tax treatment;
-- silently change a NAV mapping or schema version;
-- delete retained invoices when an organization account is closed;
-- bypass, weaken, or mark optional the required pull-request `verify` check;
-- expose Better Auth/control-plane routes on the machine-API host;
-- treat Stripe Tax output as legal approval or as an unrestricted NAV mapping;
-- map a Stripe void, credit note, refund, or dispute directly to a Hungarian correction/storno without an approved workflow.
+- hide Billingo or Számlázz.hu behind NAVRelay;
+- create an external series, accept a caller- or provider-assigned number, or import an issued invoice or standalone finalized PDF;
+- store canonical PDFs in Stripe, PostgreSQL blobs, local disk, or Railway volumes; replace or edit them; reuse numbers; or allocate outside a safe transaction;
+- mark NAV success at transaction ID or poll NAV in the request process;
+- accept arbitrary remote PDF URLs, Stripe receipts or invoice PDFs as canonical documents, or bytes outside an active scoped `TRUSTED_CLIENT_RENDERED` request;
+- expose public S3 buckets or permanent URLs, or treat S3 ETags as legal or integrity hashes;
+- log raw secrets or invoice bodies, rely on frontend authorization, or guess tax;
+- silently change NAV mappings or schema versions, or delete retained invoices;
+- weaken or make `verify` optional, or expose Better Auth or control routes on the machine-API host;
+- treat Stripe Tax as legal approval, or map Stripe voids, credit notes, refunds, or disputes directly to Hungarian corrections or storno.
 
 ## 45. Agent workflow
 
-Before implementing a change:
+Before changing code:
 
 1. Read this file and `defaultstack.md`.
-2. Identify affected domain invariants, tenants, documents, NAV mappings, and retention rules.
-3. Check current official NAV/Stripe documentation when the change touches either integration.
-4. Update or add a generated MikroORM migration for schema changes.
-5. Add tests for success, duplicate/retry behavior, authorization, and failure recovery.
-6. Regenerate OpenAPI and frontend clients when the API changes.
-7. Run targeted tests during development.
-8. Run `pnpm run verify` before declaring completion.
-9. Ensure the GitHub Actions `verify` workflow uses the same command and remains green for the pull request.
-10. Report any legal assumption, missing official specification, unverified provider behavior, or blocked test explicitly.
+2. Map affected invariants, tenants, documents, NAV mappings, and retention rules.
+3. Check current official NAV or Stripe documentation.
+4. Add or update generated MikroORM migrations for schema changes.
+5. Test success, duplicates, retries, authorization, and failure recovery.
+6. Regenerate OpenAPI and client artifacts after API changes.
+7. Run targeted tests, then unchanged `pnpm run verify`; keep the PR's `verify` check green.
+8. Report legal assumptions, missing specifications, unverified provider behavior, and blocked tests.
 
-When uncertain, fail closed rather than issuing, exposing, overwriting, or deleting a legal document incorrectly.
+When uncertain, fail closed: do not issue, expose, overwrite, or delete a legal document on a guess.
 
 ## 46. Official implementation references
 
-Verify current versions before implementation:
+Check current versions and these official references before implementation:
 
-- NAV Online Számla public repository: https://github.com/nav-gov-hu/Online-Invoice
-- NAV Online Számla production portal: https://onlineszamla.nav.gov.hu/
-- NAV Online Számla test portal: https://onlineszamla-test.nav.gov.hu/
+- NAV Online Számla repository: https://github.com/nav-gov-hu/Online-Invoice
+- NAV production portal: https://onlineszamla.nav.gov.hu/
+- NAV test portal: https://onlineszamla-test.nav.gov.hu/
 - Hungarian invoice-program regulation: https://njt.hu/jogszabaly/2014-23-20-2X
 - NAV electronic-invoice guidance: https://nav.gov.hu/ado/afa/Az_elektronikus_szaml20200416
 - Better Auth Organization plugin: https://better-auth.com/docs/plugins/organization
 - Railway public-networking headers: https://docs.railway.com/networking/public-networking/specs-and-limits
 - Stripe Invoice API: https://docs.stripe.com/api/invoices
-- Stripe invoice lifecycle and finalization: https://docs.stripe.com/invoicing/integration/workflow-transitions
+- Stripe invoice lifecycle: https://docs.stripe.com/invoicing/integration/workflow-transitions
 - Stripe webhooks: https://docs.stripe.com/webhooks
 - Stripe Checkout invoice creation: https://docs.stripe.com/api/checkout/sessions/create
 - Stripe Tax: https://docs.stripe.com/tax
 
-The repository must pin and document the exact NAV schema, Stripe API version, renderer version, and mapping-policy version used by each production release.
+Each production release must pin and document its NAV schema, Stripe API version, renderer version, and mapping-policy version.
